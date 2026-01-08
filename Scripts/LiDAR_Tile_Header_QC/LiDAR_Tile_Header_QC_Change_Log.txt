@@ -1,0 +1,11 @@
+LiDAR_Strip_Header
+by Spencer Floyd
+spencer.floyd@gov.bc.ca
+
+v1.0 - June 17th, 2024
+- First executable created
+
+v1.1 - August 15th, 2024
+- Removed offset value checks
+
+

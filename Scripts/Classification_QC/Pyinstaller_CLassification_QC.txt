@@ -1,0 +1,16 @@
+pyinstaller --onefile --clean --noconfirm ^
+--icon="Z:\SPENCER_FLOYD\.ico\Class_QC_icon.ico" ^
+--hidden-import=rasterio.sample ^
+--hidden-import=rasterio.vrt ^
+--hidden-import=rasterio._features ^
+--hidden-import=rasterio._io ^
+--hidden-import=rasterio._warp ^
+--hidden-import=rasterio._sieve ^
+--hidden-import=rasterio._err ^
+--hidden-import=rasterio._crs ^
+--hidden-import=rasterio._transform ^
+--add-data "Z:\SPENCER_FLOYD\.ico\Class_QC_icon.ico;." ^
+--add-data "C:\Users\SFLOYD\AppData\Local\anaconda3\envs\geo\Library\share\gdal;gdal_data" ^
+--add-data "C:\Users\SFLOYD\AppData\Local\anaconda3\envs\geo\Library\share\proj;proj_data" ^
+"V:\Production_NAS\Supporting_Production_Files\Top_common\Software\GeoBC\Classification_QC\Python\Classification_QC_v2.5.py"
+

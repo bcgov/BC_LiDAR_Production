@@ -1,0 +1,53 @@
+Classification_QC
+by Spencer Floyd
+spencer.floyd@gov.bc.ca
+
+Classification_QC_v1.0 - March 13th, 2024
+- initial creation
+
+Classification_QC_v1.1 - March 27th, 2024
+- fixed low point rasters issue (was using highest point instead of lowest)
+
+Classification_QC_v1.2 - April 16th, 2024
+- added range rasters for both high and low points
+- changed DSM to false colouring
+
+Classification_QC_v1.3 - April 25th, 2024
+- added classes 31 and 32 to noise rasters
+
+Classification_QC_v1.4 - May 15th, 2024
+- removed classes 31 and 32 from noise rasters
+- added class 1, 3, and 4 to high noise range rasters
+- added default and ground density grids
+- added error pop up if no directory is chosen
+
+Classification_QC_v1.5 - September 5th, 2024
+- removed rasters people weren't using anymore
+- hardcoded resolutions for all remaining rasters
+
+Classification_QC_v1.6 - October 10th, 2024
+- added defualt density rasters back
+
+Classification_QC_v1.7 - Decemeber 30th, 2024
+- added class 18 density rasters (geowizard outlier class)
+
+Classification_QC_v2.0 - March 4th, 2024
+- hillshade now creates one geotiff per LiDAR file
+
+Classification_QC_v2.2 - April 10th, 2025
+- Changed the pixel resolution to be generally courser for all rasters
+
+Classification_QC_v2.3 - May 16th, 2025
+- Merged geotiffs based on 'islands' of rasters
+
+Classification_QC_v2.4 - November 3rd, 2025
+- geotiffs merged based on utm zone in filename
+- .ico file baked into executable
+- GUI options rearranged
+
+Classification_QC_v2.5 - November 21st, 2025
+- islands are merged a second time if bounding boxes overlap with each other
+- original geotiff files are sent to an Original folder to keep islands and original rasters separate
+
+Classification_QC_v2.6 - December 31st, 2025
+- resolution options added for Hillshade and High Point Range Rasters

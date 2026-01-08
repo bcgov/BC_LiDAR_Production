@@ -1,0 +1,48 @@
+Classification_Macro_Generator
+by Spencer Floyd
+spencer.floyd@gov.bc.ca
+
+Classification_Macro_Generator_v1.0 - November 1st, 2024
+- initial creation
+
+Classification_Macro_Generator_v1.2 - November 22nd, 2024
+- changed Max Triangle value in all three height from ground steps from 100m to 20m
+
+Classification_Macro_Generator_v1.3/4 (bug fixed same day) - November 28th, 2024
+- changed grounding parameters to be more aggressive
+
+Classification_Macro_Generator_v1.5 - December 3rd, 2024
+- added classify by intensity step (>=2100 sent to class 7)
+
+Classification_Macro_Generator_v1.6 - December 11th, 2024
+- changed classify by intensity step (>=2200 sent to class 7)
+
+Classification_Macro_Generator_v1.7 - January 28th, 2025
+- Added isolated points step (15 points within 5 meters)
+
+Classification_Macro_Generator_v2.0 - February 24th, 2025
+- Added LAZ conversion to LAS functionality
+- Macro now deletes duplicate points
+- Added PRJ creation
+
+Classification_Macro_Generator_v2.1 - March 24th, 2025
+- Changed class by intensity step from >2200 to >2400
+
+Classification_Macro_Generator_v2.2 - April 2nd, 2025
+- removed classify by intensity step
+
+Classification_Macro_Generator_v2.3 - April 10th, 2025
+- added height from ground step to deal with extremely high noise
+
+Classification_Macro_Generator_v2.4 - June 17th, 2025
+- changed the parameters for the Below Surface step to be more aggressive
+- added Isolated Points step for ground after Below Surface step
+- added Height From Ground step after Isolated Points step for ground
+
+Classification_Macro_Generator_v2.5 - July 11th, 2025
+- added cores option
+- changed las2las64 command to work with future version of LAStools
+
+Classification_Macro_Generator_v3.0 - November 14th, 2025
+- tiles are split into Urban and Regular folders with separate macros created for each with different ground parameters
+- icon now built into the executable
