@@ -42,7 +42,14 @@ def print_rainbow_dashes(line_length=120):
     print()
 
 # --- Copy large LAZ files safely to local destination ---
-def copy_large_file_safe(src_path, dest_path, buffer_size=16 * 1024 * 1024):
+def copy_large_file_safe(
+    src_path,
+    dest_path,
+    buffer_size=16 * 1024 * 1024,
+    progress_cb=None,          # progress_cb(bytes_done, total_bytes, elapsed_s)
+    status_cb=None,            # status_cb(text)
+    update_interval=0.25
+):
     start_time = time.time()
     bytes_copied = 0
     dest_dir = os.path.dirname(dest_path)
@@ -50,7 +57,16 @@ def copy_large_file_safe(src_path, dest_path, buffer_size=16 * 1024 * 1024):
     temp_path = dest_path + ".part"
 
     try:
-        print(f"Copying file to temp path: {src_path} -> {temp_path}")
+        total_bytes = None
+        try:
+            total_bytes = os.path.getsize(src_path)
+        except Exception:
+            total_bytes = None
+
+        if status_cb:
+            status_cb(f"Copying {os.path.basename(src_path)}...")
+
+        last_ui = 0.0
         with open(src_path, "rb") as src_file, open(temp_path, "wb") as dest_file:
             while True:
                 chunk = src_file.read(buffer_size)
@@ -58,21 +74,38 @@ def copy_large_file_safe(src_path, dest_path, buffer_size=16 * 1024 * 1024):
                     break
                 dest_file.write(chunk)
                 bytes_copied += len(chunk)
+
+                if progress_cb:
+                    now = time.time()
+                    if (now - last_ui) >= update_interval:
+                        elapsed = max(1e-6, now - start_time)
+                        progress_cb(bytes_copied, total_bytes, elapsed)
+                        last_ui = now
+
         os.replace(temp_path, dest_path)
+
         elapsed_time = time.time() - start_time
-        print(f"Copy completed: {dest_path} ({bytes_copied} bytes in {elapsed_time:.2f}s)")
+        if progress_cb:
+            progress_cb(bytes_copied, total_bytes, max(1e-6, elapsed_time))
+
         return bytes_copied, elapsed_time
+
     except Exception as e:
         print(f"Error during copy: {e}")
         if os.path.exists(temp_path):
-            os.remove(temp_path)
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
         return None, None
 
 # --- Copy + convert pipeline (background thread) ---
 def run_copy_convert_pipeline(source_dir, dest_dir, max_conversions, num_cores,
-                              skip_existing, status_var, copied_count_var, converted_count_var, start_button):
+                              skip_existing, status_var, copied_count_var, converted_count_var,
+                              start_button, copy_progress_var, copy_speed_var, copy_file_var):
     copied_count = 0
     converted_count = 0
+    total_tiles = 0
     error_flag = False
     las_root = os.path.join(dest_dir, "LAS")
     os.makedirs(las_root, exist_ok=True)
@@ -80,12 +113,50 @@ def run_copy_convert_pipeline(source_dir, dest_dir, max_conversions, num_cores,
     def update_status(text):
         root.after(0, lambda: status_var.set(text))
 
+    def reset_copy_ui(total):
+        def _reset():
+            copy_progress_var.set(f"Downloaded: 0/{total} ({total} left)")
+            copy_speed_var.set("Speed: -- MiB/s")
+            copy_file_var.set("")
+        root.after(0, _reset)
+
     def update_counts(copied_delta=0, converted_delta=0):
         nonlocal copied_count, converted_count
         copied_count += copied_delta
         converted_count += converted_delta
-        root.after(0, lambda: (copied_count_var.set(str(copied_count)),
-                               converted_count_var.set(str(converted_count))))
+        left = max(total_tiles - copied_count, 0)
+
+        def _update():
+            copied_count_var.set(str(copied_count))
+            converted_count_var.set(str(converted_count))
+            copy_progress_var.set(f"Downloaded: {copied_count}/{total_tiles} ({left} left)")
+        root.after(0, _update)
+
+    def update_copy_file(text):
+        root.after(0, lambda: copy_file_var.set(text))
+
+    def update_copy_progress(bytes_done, total_bytes, elapsed_s, name):
+        speed_mib = (bytes_done / 1024 / 1024) / max(elapsed_s, 1e-6)
+        if total_bytes:
+            percent = (bytes_done / total_bytes) * 100.0
+            file_text = f"{name} {percent:.1f}%"
+        else:
+            file_text = name
+
+        def _update():
+            copy_file_var.set(file_text)
+            copy_speed_var.set(f"Speed: {speed_mib:.2f} MiB/s")
+        root.after(0, _update)
+
+    def make_progress_cb(name):
+        def _progress(bytes_done, total_bytes, elapsed_s):
+            update_copy_progress(bytes_done, total_bytes, elapsed_s, name)
+        return _progress
+
+    def make_status_cb():
+        def _status(text):
+            update_copy_file(text)
+        return _status
 
     def enable_start_button():
         root.after(0, lambda: start_button.config(state=tk.NORMAL))
@@ -115,6 +186,8 @@ def run_copy_convert_pipeline(source_dir, dest_dir, max_conversions, num_cores,
         with ThreadPoolExecutor(max_workers=max_conversions) as executor:
             conversion_started = False
             laz_files = sorted(f for f in os.listdir(source_dir) if f.lower().endswith(".laz"))
+            total_tiles = len(laz_files)
+            reset_copy_ui(total_tiles)
             if not laz_files:
                 update_status("No .laz files found in source.")
                 root.after(0, lambda: messagebox.showinfo(
@@ -129,9 +202,16 @@ def run_copy_convert_pipeline(source_dir, dest_dir, max_conversions, num_cores,
 
                 if skip_existing and os.path.exists(dest_path):
                     print(f"Skipping copy (exists): {dest_path}")
+                    update_copy_file(f"Skipping {filename}")
                     update_counts(copied_delta=1)
                 else:
-                    bytes_copied, _ = copy_large_file_safe(src_path, dest_path)
+                    bytes_copied, _ = copy_large_file_safe(
+                        src_path,
+                        dest_path,
+                        progress_cb=make_progress_cb(filename),
+                        status_cb=make_status_cb(),
+                        update_interval=0.25
+                    )
                     if bytes_copied is None:
                         show_error("Copy Error", f"Failed to copy: {src_path}")
                         continue
@@ -629,6 +709,11 @@ def on_start_copy_convert():
     converted_count_var.set("0")
     status_var.set("Starting copy + convert...")
     start_copy_convert_button.config(state=tk.DISABLED)
+    root.after(0, lambda: (
+        copy_progress_var.set("Downloaded: 0/0 (0 left)"),
+        copy_speed_var.set("Speed: -- MiB/s"),
+        copy_file_var.set("")
+    ))
 
     las_root = os.path.join(dest_dir, "LAS")
     existing_files = [f for f in os.listdir(dest_dir) if f.lower().endswith(".laz")]
@@ -656,7 +741,10 @@ def on_start_copy_convert():
             status_var,
             copied_count_var,
             converted_count_var,
-            start_copy_convert_button
+            start_copy_convert_button,
+            copy_progress_var,
+            copy_speed_var,
+            copy_file_var
         ),
         daemon=True
     )
@@ -703,6 +791,9 @@ max_conversions_var   = tk.StringVar(value="2")
 status_var            = tk.StringVar(value="Idle")
 copied_count_var      = tk.StringVar(value="0")
 converted_count_var   = tk.StringVar(value="0")
+copy_progress_var     = tk.StringVar(value="0/0 (0 left)")
+copy_speed_var        = tk.StringVar(value="Speed: -- MiB/s")
+copy_file_var         = tk.StringVar(value="")
 
 # Root grid config
 root.columnconfigure(0, weight=1)
@@ -775,6 +866,10 @@ ttk.Label(right, text="(tiles convert in parallel; ID scan uses same value)").gr
 
 start_copy_convert_button = ttk.Button(right, text="Start Copy + Convert", command=on_start_copy_convert)
 start_copy_convert_button.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+
+ttk.Label(right, textvariable=copy_progress_var).grid(row=6, column=0, columnspan=3, sticky="w", pady=(6, 0))
+ttk.Label(right, textvariable=copy_file_var).grid(row=7, column=0, columnspan=3, sticky="w")
+ttk.Label(right, textvariable=copy_speed_var).grid(row=8, column=0, columnspan=3, sticky="w", pady=(0, 4))
 
 # ---------- Bottom status bar (spans both columns) ----------
 status_bar = ttk.Frame(main, padding=(8, 10))
