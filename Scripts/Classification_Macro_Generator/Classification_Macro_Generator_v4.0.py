@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from tqdm import tqdm
 import time
 import tkinter as tk
+from tkinter import ttk
 from tkinter import filedialog, messagebox
 from colorama import Fore, Style
 import pickle
@@ -16,7 +17,7 @@ import threading
 warnings.filterwarnings("ignore", category=UserWarning, module="pkg_resources")
 
 # Version of the executable
-version = '3.2'
+version = '4.0 BETA'
 
 # --- Helper for resource loading (works for PyInstaller) ---
 def resource_path(relative_path):
@@ -68,16 +69,11 @@ def copy_large_file_safe(src_path, dest_path, buffer_size=16 * 1024 * 1024):
         return None, None
 
 # --- Copy + convert pipeline (background thread) ---
-def run_copy_convert_pipeline(source_dir, dest_dir, copy_as_arrive, max_conversions, num_cores,
+def run_copy_convert_pipeline(source_dir, dest_dir, max_conversions, num_cores,
                               skip_existing, status_var, copied_count_var, converted_count_var, start_button):
-    processed = set()
     copied_count = 0
     converted_count = 0
-    futures = set()
     error_flag = False
-    poll_interval_sec = 2
-    idle_timeout_sec = 120
-    last_activity_time = time.time()
     las_root = os.path.join(dest_dir, "LAS")
     os.makedirs(las_root, exist_ok=True)
 
@@ -96,11 +92,18 @@ def run_copy_convert_pipeline(source_dir, dest_dir, copy_as_arrive, max_conversi
 
     def show_success(subdirs, elapsed_time):
         def _show():
-            messagebox.showinfo("Success", f"Macro and PRJ files created in:\n{', '.join(subdirs)}")
+            paths_text = "\n".join(subdirs)
+            messagebox.showinfo("Success", f"Macro and PRJ files created in:\n{paths_text}")
         root.after(0, _show)
 
     def show_error(title, message):
         nonlocal error_flag
+
+        # If we've already shown an error, don't spam more popups.
+        if error_flag:
+            print(message)
+            return
+
         error_flag = True
         print(message)
         root.after(0, lambda: (status_var.set("Error"), messagebox.showerror(title, message)))
@@ -111,76 +114,49 @@ def run_copy_convert_pipeline(source_dir, dest_dir, copy_as_arrive, max_conversi
         start_time = time.time()
         with ThreadPoolExecutor(max_workers=max_conversions) as executor:
             conversion_started = False
-            while True:
-                laz_files = [f for f in os.listdir(source_dir) if f.lower().endswith(".laz")]
-                processed_any = False
-                for filename in laz_files:
-                    if filename in processed:
+            laz_files = sorted(f for f in os.listdir(source_dir) if f.lower().endswith(".laz"))
+            if not laz_files:
+                update_status("No .laz files found in source.")
+                root.after(0, lambda: messagebox.showinfo(
+                    "No tiles",
+                    "No .laz files found in the source folder."
+                ))
+                return
+            for filename in laz_files:
+                src_path = os.path.join(source_dir, filename)
+                dest_path = os.path.join(dest_dir, filename)
+                las_output_path = os.path.join(las_root, f"{os.path.splitext(filename)[0]}.las")
+
+                if skip_existing and os.path.exists(dest_path):
+                    print(f"Skipping copy (exists): {dest_path}")
+                    update_counts(copied_delta=1)
+                else:
+                    bytes_copied, _ = copy_large_file_safe(src_path, dest_path)
+                    if bytes_copied is None:
+                        show_error("Copy Error", f"Failed to copy: {src_path}")
                         continue
-                    src_path = os.path.join(source_dir, filename)
-                    dest_path = os.path.join(dest_dir, filename)
-                    las_output_path = os.path.join(las_root, f"{os.path.splitext(filename)[0]}.las")
+                    update_counts(copied_delta=1)
 
-                    if skip_existing and os.path.exists(dest_path):
-                        print(f"Skipping copy (exists): {dest_path}")
-                        processed.add(filename)
-                        processed_any = True
-                        update_counts(copied_delta=1)
-                        last_activity_time = time.time()
-                    else:
-                        bytes_copied, _ = copy_large_file_safe(src_path, dest_path)
-                        if bytes_copied is None:
-                            show_error("Copy Error", f"Failed to copy: {src_path}")
-                            continue
-                        processed.add(filename)
-                        processed_any = True
-                        update_counts(copied_delta=1)
-                        last_activity_time = time.time()
+                if skip_existing and os.path.exists(las_output_path):
+                    print(f"Skipping conversion (exists): {las_output_path}")
+                    continue
 
-                    if skip_existing and os.path.exists(las_output_path):
-                        print(f"Skipping conversion (exists): {las_output_path}")
-                        continue
+                if not conversion_started:
+                    update_status("Converting tiles...")
+                    conversion_started = True
+                future = executor.submit(convert_one_laz_to_las, dest_path, las_root, num_cores)
 
-                    if not conversion_started:
-                        update_status("Converting tiles...")
-                        conversion_started = True
-                    future = executor.submit(convert_one_laz_to_las, dest_path, las_root, num_cores)
-                    futures.add(future)
-                    last_activity_time = time.time()
+                def _conversion_done(f):
+                    try:
+                        result = f.result()
+                        if result:
+                            update_counts(converted_delta=1)
+                        else:
+                            show_error("Conversion Error", "Conversion failed. See console for details.")
+                    except Exception as e:
+                        show_error("Conversion Error", f"Conversion error: {e}")
 
-                    def _conversion_done(f):
-                        try:
-                            result = f.result()
-                            if result:
-                                update_counts(converted_delta=1)
-                            else:
-                                show_error("Conversion Error", "Conversion failed. See console for details.")
-                        except Exception as e:
-                            show_error("Conversion Error", f"Conversion error: {e}")
-
-                    future.add_done_callback(_conversion_done)
-
-                done = {f for f in futures if f.done()}
-                futures.difference_update(done)
-
-                if not copy_as_arrive and not futures:
-                    break
-
-                if copy_as_arrive and not processed_any and not futures:
-                    if time.time() - last_activity_time >= idle_timeout_sec:
-                        break
-                time.sleep(poll_interval_sec)
-        if error_flag:
-            return
-        if futures:
-            for future in list(futures):
-                try:
-                    result = future.result()
-                    if not result:
-                        show_error("Conversion Error", "Conversion failed. See console for details.")
-                except Exception as e:
-                    show_error("Conversion Error", f"Conversion error: {e}")
-            futures.clear()
+                future.add_done_callback(_conversion_done)
         if error_flag:
             return
         update_status("Generating macros...")
@@ -491,45 +467,66 @@ def create_macro_and_prj_urban(directory, unique_point_source_ids):
 
 # --- Organize LAS files using pickle ---
 def organize_las_files(las_directory):
+    """
+    Sort root-level LAS files into Urban/Regular (if pickle exists),
+    using STEM matching (so .laz vs .las doesn't break),
+    and ALWAYS return BOTH Urban and Regular folder paths.
+    """
+    las_directory = os.path.normpath(las_directory)
+
+    urban_dir = os.path.join(las_directory, "Urban")
+    regular_dir = os.path.join(las_directory, "Regular")
+    os.makedirs(urban_dir, exist_ok=True)
+    os.makedirs(regular_dir, exist_ok=True)
+
+    # Helper: file stem (no extension)
+    def stem(name: str) -> str:
+        return os.path.splitext(str(name))[0].lower()
+
+    # If no pickle, we can't sort — but still show both paths
     if not os.path.exists(pickle_path):
         print("⚠️ No pickle file found — skipping Urban/Regular sort.")
-        return [las_directory]
+        return [urban_dir, regular_dir]
 
+    # Load and normalize urban tile identifiers
     with open(pickle_path, "rb") as f:
         urban_tiles = pickle.load(f)
 
-    las_files = [os.path.join(las_directory, f) for f in os.listdir(las_directory) if f.lower().endswith(".las")]
+    urban_stems = {stem(t) for t in urban_tiles}
 
-    urban_files = []
-    regular_files = []
+    # Only sort LAS files currently sitting in the root LAS dir
+    root_las_files = [
+        f for f in os.listdir(las_directory)
+        if f.lower().endswith(".las") and os.path.isfile(os.path.join(las_directory, f))
+    ]
 
-    # Separate files
-    for las_file in las_files:
-        filename = os.path.basename(las_file)
-        if any(tile.lower() in filename.lower() for tile in urban_tiles):
-            urban_files.append(las_file)
+    moved_urban = 0
+    moved_regular = 0
+
+    for filename in root_las_files:
+        file_stem = stem(filename)
+
+        # Primary: exact stem match
+        is_urban = (file_stem in urban_stems)
+
+        # Secondary fallback: substring match (keeps old behavior if your pickle contains partial IDs)
+        if not is_urban:
+            is_urban = any(u in file_stem for u in urban_stems)
+
+        dest_folder = urban_dir if is_urban else regular_dir
+        shutil.move(os.path.join(las_directory, filename), os.path.join(dest_folder, filename))
+
+        if is_urban:
+            moved_urban += 1
         else:
-            regular_files.append(las_file)
+            moved_regular += 1
 
-    subfolders = []
+    print(f"[SORT] Moved Urban: {moved_urban} | Regular: {moved_regular}")
+    print(f"[SORT] Urban dir: {urban_dir}")
+    print(f"[SORT] Regular dir: {regular_dir}")
 
-    # Move urban files only if there are any
-    if urban_files:
-        urban_dir = os.path.join(las_directory, "Urban")
-        os.makedirs(urban_dir, exist_ok=True)
-        for f in urban_files:
-            shutil.move(f, os.path.join(urban_dir, os.path.basename(f)))
-        subfolders.append(urban_dir)
-
-    # Move regular files only if there are any
-    if regular_files:
-        regular_dir = os.path.join(las_directory, "Regular")
-        os.makedirs(regular_dir, exist_ok=True)
-        for f in regular_files:
-            shutil.move(f, os.path.join(regular_dir, os.path.basename(f)))
-        subfolders.append(regular_dir)
-
-    return subfolders
+    # Always return both paths so the popup shows both
+    return [regular_dir, urban_dir]
 
 # --- Main processing logic ---
 def create_macro_file(directory, num_cores):
@@ -556,7 +553,8 @@ def create_macro_file(directory, num_cores):
     elapsed_time = time.time() - start_time
     print_rainbow_dashes()
     print(f"Processing took {elapsed_time:.2f} seconds.")
-    messagebox.showinfo("Success", f"Macro and PRJ files created in:\n{', '.join(subdirs)}")
+    paths_text = "\n".join(subdirs)
+    messagebox.showinfo("Success", f"Macro and PRJ files created in:\n{paths_text}")
 
 # --- GUI setup ---
 def select_directory():
@@ -652,7 +650,6 @@ def on_start_copy_convert():
         args=(
             source_dir,
             dest_dir,
-            copy_as_arrive_var.get(),
             max_conversions,
             num_cores,
             skip_existing,
@@ -665,51 +662,141 @@ def on_start_copy_convert():
     )
     worker.start()
 
+# --- GUI setup (ttk + 2-column layout) ---
+
 # Path to your ICO
 icon_path = resource_path("Macro_Generator.ico")
 
 root = tk.Tk()
 root.title(f"Classification Macro Generator v{version}")
-root.geometry("520x420")
-root.iconbitmap(icon_path)  # sets the window and taskbar icon
+root.iconbitmap(icon_path)
+root.resizable(True, True)
 
+# A nicer default size for the new 2-column layout
+root.geometry("920x430")
+root.minsize(840, 400)
+
+# Use a native-ish theme if available
+style = ttk.Style()
+try:
+    style.theme_use("vista")   # best on Windows if available
+except tk.TclError:
+    try:
+        style.theme_use("clam")
+    except tk.TclError:
+        pass
+
+# Slightly nicer padding on buttons/frames
+style.configure("TButton", padding=(10, 6))
+style.configure("TLabelframe", padding=(10, 8))
+style.configure("TLabelframe.Label", font=("Segoe UI", 10, "bold"))
+
+# Variables
 directory_path = tk.StringVar()
 cores_var = tk.StringVar(value="4")
+
 source_directory_path = tk.StringVar()
-dest_directory_path = tk.StringVar()
-copy_as_arrive_var = tk.BooleanVar(value=True)
-max_conversions_var = tk.StringVar(value="2")
-status_var = tk.StringVar(value="Idle")
-copied_count_var = tk.StringVar(value="0")
-converted_count_var = tk.StringVar(value="0")
+dest_directory_path   = tk.StringVar()
 
-tk.Entry(root, textvariable=directory_path, width=50).pack(padx=10, pady=5)
-tk.Button(root, text="Select Directory", command=select_directory).pack(pady=5)
-tk.Label(root, text="Number of Cores:").pack()
-tk.OptionMenu(root, cores_var, *[str(i) for i in range(1, 33)]).pack()
-tk.Button(root, text="Create Macro File", command=on_create_macro_file).pack(pady=20)
+max_conversions_var   = tk.StringVar(value="2")
 
-tk.Label(root, text="Source Folder (Network/UNC):").pack()
-tk.Entry(root, textvariable=source_directory_path, width=50).pack(padx=10, pady=5)
-tk.Button(root, text="Select Source Folder", command=select_source_directory).pack(pady=5)
+status_var            = tk.StringVar(value="Idle")
+copied_count_var      = tk.StringVar(value="0")
+converted_count_var   = tk.StringVar(value="0")
 
-tk.Label(root, text="Destination Folder (Local):").pack()
-tk.Entry(root, textvariable=dest_directory_path, width=50).pack(padx=10, pady=5)
-tk.Button(root, text="Select Destination Folder", command=select_dest_directory).pack(pady=5)
+# Root grid config
+root.columnconfigure(0, weight=1)
+root.rowconfigure(0, weight=1)
 
-tk.Checkbutton(root, text="Copy from source and process as files arrive",
-               variable=copy_as_arrive_var).pack(pady=5)
+# Main container
+main = ttk.Frame(root, padding=12)
+main.grid(row=0, column=0, sticky="nsew")
+main.columnconfigure(0, weight=1, uniform="maincols")
+main.columnconfigure(1, weight=1, uniform="maincols")
+main.rowconfigure(0, weight=1)
 
-tk.Label(root, text="Max Concurrent Conversions:").pack()
-tk.OptionMenu(root, max_conversions_var, *[str(i) for i in range(1, 5)]).pack()
+# ---------- LEFT: Convert existing folder ----------
+left = ttk.LabelFrame(main, text="Workflow A — Convert Local Folder → Generate Macro")
+left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+left.columnconfigure(0, weight=0)
+left.columnconfigure(1, weight=1)
+left.columnconfigure(2, weight=0)
 
-start_copy_convert_button = tk.Button(root, text="Start Copy + Convert", command=on_start_copy_convert)
-start_copy_convert_button.pack(pady=10)
+ttk.Label(left, text="Input folder (Local):").grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 4))
 
-tk.Label(root, textvariable=status_var).pack()
-tk.Label(root, text="Copied:").pack()
-tk.Label(root, textvariable=copied_count_var).pack()
-tk.Label(root, text="Converted:").pack()
-tk.Label(root, textvariable=converted_count_var).pack()
+# --- Path row (A) ---
+a_path_row = ttk.Frame(left)
+a_path_row.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0, 8))
+a_path_row.columnconfigure(0, weight=1)
+
+dir_entry = ttk.Entry(a_path_row, textvariable=directory_path)
+dir_entry.grid(row=0, column=0, sticky="ew")
+
+ttk.Button(a_path_row, text="Browse…", command=select_directory).grid(row=0, column=1, padx=(8, 0))
+
+ttk.Label(left, text="Cores (LAStools):").grid(row=2, column=0, sticky="w")
+cores_combo = ttk.Combobox(left, textvariable=cores_var, values=[str(i) for i in range(1, 9)], state="readonly", width=6)
+cores_combo.grid(row=2, column=1, sticky="w", pady=(2, 10))
+ttk.Label(left, text="(batch convert; ID scan uses same value)").grid(row=2, column=2, sticky="w", padx=(8, 0), pady=(2, 10))
+
+ttk.Button(left, text="Create Macro File", command=on_create_macro_file).grid(row=3, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+
+# ---------- RIGHT: Copy + convert pipeline ----------
+right = ttk.LabelFrame(main, text="Workflow B — Copy From Network → Convert → Generate Macro")
+right.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+right.columnconfigure(0, weight=0)
+right.columnconfigure(1, weight=1)
+right.columnconfigure(2, weight=0)
+
+ttk.Label(right, text="Source folder (Network):").grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 4))
+b_src_row = ttk.Frame(right)
+b_src_row.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0, 8))
+b_src_row.columnconfigure(0, weight=1)
+
+src_entry = ttk.Entry(b_src_row, textvariable=source_directory_path)
+src_entry.grid(row=0, column=0, sticky="ew")
+
+ttk.Button(b_src_row, text="Browse…", command=select_source_directory).grid(row=0, column=1, padx=(8, 0))
+
+ttk.Label(right, text="Destination folder (Local):").grid(row=2, column=0, columnspan=3, sticky="w", pady=(0, 4))
+b_dst_row = ttk.Frame(right)
+b_dst_row.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(0, 8))
+b_dst_row.columnconfigure(0, weight=1)
+
+dst_entry = ttk.Entry(b_dst_row, textvariable=dest_directory_path)
+dst_entry.grid(row=0, column=0, sticky="ew")
+
+ttk.Button(b_dst_row, text="Browse…", command=select_dest_directory).grid(row=0, column=1, padx=(8, 0))
+
+ttk.Label(right, text="Cores (Parallel tiles):").grid(row=4, column=0, sticky="w")
+max_combo = ttk.Combobox(right, textvariable=max_conversions_var, values=[str(i) for i in range(1, 9)], state="readonly", width=6)
+max_combo.grid(row=4, column=1, sticky="w", pady=(2, 10))
+ttk.Label(right, text="(tiles convert in parallel; ID scan uses same value)").grid(row=4, column=2, sticky="w", padx=(8, 0), pady=(2, 10))
+
+start_copy_convert_button = ttk.Button(right, text="Start Copy + Convert", command=on_start_copy_convert)
+start_copy_convert_button.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+
+# ---------- Bottom status bar (spans both columns) ----------
+status_bar = ttk.Frame(main, padding=(8, 10))
+status_bar.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+status_bar.columnconfigure(0, weight=1)
+
+ttk.Separator(main).grid(row=2, column=0, columnspan=2, sticky="ew", pady=(8, 6))
+
+status_line = ttk.Frame(main)
+status_line.grid(row=3, column=0, columnspan=2, sticky="ew")
+status_line.columnconfigure(1, weight=1)
+
+ttk.Label(status_line, text="Status:").grid(row=0, column=0, sticky="w")
+ttk.Label(status_line, textvariable=status_var).grid(row=0, column=1, sticky="w")
+
+ttk.Label(status_line, text="Copied:").grid(row=0, column=2, sticky="e", padx=(20, 4))
+ttk.Label(status_line, textvariable=copied_count_var, width=6).grid(row=0, column=3, sticky="w")
+
+ttk.Label(status_line, text="Converted:").grid(row=0, column=4, sticky="e", padx=(20, 4))
+ttk.Label(status_line, textvariable=converted_count_var, width=6).grid(row=0, column=5, sticky="w")
+
+# Let layout settle, then clamp min size to content
+root.update_idletasks()
 
 root.mainloop()
