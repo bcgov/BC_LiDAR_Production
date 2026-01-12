@@ -14,6 +14,16 @@ import shutil
 import warnings
 import threading
 
+# --- PyInstaller windowed app can have stdout/stderr = None ---
+def _ensure_streams():
+    import sys, os
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w", encoding="utf-8")
+
+_ensure_streams()
+
 warnings.filterwarnings("ignore", category=UserWarning, module="pkg_resources")
 
 # Version of the executable
@@ -370,9 +380,10 @@ def get_point_source_ids(file_path):
 def list_point_source_ids(directory):
     point_source_ids = set()
     las_files = [os.path.join(directory, f) for f in os.listdir(directory) if f.lower().endswith(".las")]
+    no_console = (sys.stdout is None) or (sys.stderr is None)
 
     with ThreadPoolExecutor(max_workers=4) as executor:
-        with tqdm(total=len(las_files), desc=f"Gathering Point Source IDs in {os.path.basename(directory)}") as pbar:
+        with tqdm(total=len(las_files), desc=f"Gathering Point Source IDs in {os.path.basename(directory)}", disable=no_console) as pbar:
             futures = {executor.submit(get_point_source_ids, file): file for file in las_files}
             for future in futures:
                 ids = future.result()
