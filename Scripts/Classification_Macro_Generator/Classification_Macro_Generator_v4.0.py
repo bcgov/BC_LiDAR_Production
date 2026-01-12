@@ -380,7 +380,7 @@ def get_point_source_ids(file_path):
 def list_point_source_ids(directory):
     point_source_ids = set()
     las_files = [os.path.join(directory, f) for f in os.listdir(directory) if f.lower().endswith(".las")]
-    no_console = (sys.stdout is None) or (sys.stderr is None)
+    no_console = getattr(sys, "frozen", False) or (sys.stdout is None) or (sys.stderr is None)
 
     with ThreadPoolExecutor(max_workers=4) as executor:
         with tqdm(total=len(las_files), desc=f"Gathering Point Source IDs in {os.path.basename(directory)}", disable=no_console) as pbar:
