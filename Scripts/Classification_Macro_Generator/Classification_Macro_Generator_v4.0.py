@@ -14,6 +14,32 @@ import shutil
 import warnings
 import threading
 
+# --- Subprocess helpers (hide LAStools windows on Windows) ---
+def _subprocess_hide_window_kwargs():
+    if os.name == "nt":
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = subprocess.SW_HIDE
+        return {
+            "startupinfo": si,
+            "creationflags": subprocess.CREATE_NO_WINDOW,
+        }
+    return {}
+
+def _run_lastools(command, cwd=None):
+    r = subprocess.run(
+        command,
+        text=True,
+        capture_output=True,
+        cwd=cwd,
+        **_subprocess_hide_window_kwargs()
+    )
+    if r.stdout:
+        print("LAStools stdout:\n" + r.stdout)
+    if r.stderr:
+        print("LAStools stderr:\n" + r.stderr)
+    return r
+
 # --- PyInstaller windowed app can have stdout/stderr = None ---
 def _ensure_streams():
     import sys, os
@@ -27,7 +53,7 @@ _ensure_streams()
 warnings.filterwarnings("ignore", category=UserWarning, module="pkg_resources")
 
 # Version of the executable
-version = '4.0 BETA'
+version = '4.0'
 
 # --- Helper for resource loading (works for PyInstaller) ---
 def resource_path(relative_path):
@@ -300,7 +326,9 @@ def convert_laz_to_las(directory, num_cores):
 
     try:
         print(f"Converting .laz files to .las in {output_directory} using {num_cores} cores...")
-        subprocess.run(command, cwd=directory, check=True)
+        r = _run_lastools(command, cwd=directory)
+        if r.returncode != 0:
+            raise subprocess.CalledProcessError(r.returncode, command, r.stdout, r.stderr)
         print_rainbow_dashes()
         print("Conversion completed successfully.")
         print_rainbow_dashes()
@@ -343,13 +371,7 @@ def convert_one_laz_to_las(laz_path, out_dir, num_cores):
 
     print(f"Converting: {laz_path} -> {las_path}")
 
-    r = subprocess.run(command, capture_output=True, text=True)
-
-    # If tool wrote anything, show it (helps future debugging)
-    if r.stdout:
-        print("stdout:\n" + r.stdout)
-    if r.stderr:
-        print("stderr:\n" + r.stderr)
+    r = _run_lastools(command)
 
     # Treat success as: returncode==0 OR output file exists and is non-trivial size
     if r.returncode != 0:
@@ -380,7 +402,7 @@ def get_point_source_ids(file_path):
 def list_point_source_ids(directory):
     point_source_ids = set()
     las_files = [os.path.join(directory, f) for f in os.listdir(directory) if f.lower().endswith(".las")]
-    no_console = getattr(sys, "frozen", False) or (sys.stdout is None) or (sys.stderr is None)
+    no_console = (sys.stdout is None) or (sys.stderr is None)
 
     with ThreadPoolExecutor(max_workers=4) as executor:
         with tqdm(total=len(las_files), desc=f"Gathering Point Source IDs in {os.path.basename(directory)}", disable=no_console) as pbar:
