@@ -71,6 +71,7 @@ import re
 UTM_RE = re.compile(r"utm(\d{1,2})", re.IGNORECASE)
 import subprocess
 import multiprocessing
+import threading
 import atexit
 from concurrent.futures import ProcessPoolExecutor
 # -------------------- stdlib imports --------------------
@@ -122,7 +123,7 @@ PACKAGED_WATER_DEFAULT  = str(DATA_ROOT / "Water_by_UTM")
 _FAULT_FH = None
 _DEVNULL_FH = None
 
-class _TeeToFile:
+class _SafeFileWriter:
     def __init__(self, file_path: Path):
         self._f = open(file_path, "a", encoding="utf-8", buffering=8192)
 
@@ -159,7 +160,7 @@ def setup_logging():
     _FAULT_FH = open(log_file, "a", encoding="utf-8", buffering=8192)
     faulthandler.enable(_FAULT_FH)
 
-    tee = _TeeToFile(log_file)
+    tee = _SafeFileWriter(log_file)
 
     def _cleanup():
         global _FAULT_FH, _DEVNULL_FH  # <-- IMPORTANT
@@ -374,24 +375,22 @@ rasterize = None
 geom_bounds = None
 reproject = None
 Resampling = None
-from_bounds = None
 RioCRS = None
 Affine = None
 
 def _import_heavy():
     global np, fiona, rasterio, rasterize, geom_bounds, reproject, Resampling
-    global from_bounds, RioCRS, Affine
+    global RioCRS, Affine
 
     if np is not None and RioCRS is not None and Affine is not None:
         return
-
 
     import numpy as _np
     import fiona as _fiona
     import rasterio as _rasterio
     from rasterio.features import rasterize as _rasterize, bounds as _geom_bounds
     from rasterio.warp import reproject as _reproject, Resampling as _Resampling
-    from rasterio.transform import from_bounds as _from_bounds, Affine as _Affine
+    from rasterio.transform import Affine as _Affine
     from rasterio.crs import CRS as _RioCRS
 
     np = _np
@@ -401,7 +400,6 @@ def _import_heavy():
     geom_bounds = _geom_bounds
     reproject = _reproject
     Resampling = _Resampling
-    from_bounds = _from_bounds
     RioCRS = _RioCRS
     Affine = _Affine
 
@@ -409,7 +407,6 @@ def _import_heavy():
 # UI colors
 # -----------------------------------------------------------------------------
 BG_MAIN = "#f0f0f0"
-BG_BAR  = "#d9d9d9"
 
 # -----------------------------------------------------------------------------
 # Constants
@@ -417,6 +414,8 @@ BG_BAR  = "#d9d9d9"
 WATER_GPKG_TEMPLATE = "Water_UTM{zone:02d}_buf50m_tilebbox.gpkg"
 WATER_LAYER_TEMPLATE = "water_utm{zone:02d}_buf50m"
 NODATA_VALUE = -9999
+DENSITY_THRESHOLD = 8       # pts/m² — tiles must meet this density
+PASS_PERCENT = 95           # % of valid pixels that must meet DENSITY_THRESHOLD
 
 WORKERS_CAP = 32
 DEFAULT_WORKERS = min(ORG_DEFAULT_WORKERS, WORKERS_CAP)
@@ -466,8 +465,6 @@ def assert_required_assets(cfg: dict):
 # -----------------------------------------------------------------------------
 # QML sidecar generation for QGIS auto-styling (SINGLE MASTER FILE APPROACH)
 # -----------------------------------------------------------------------------
-_MASTER_QML_CACHE = None  # Cache the QML XML content to avoid regenerating
-
 def _generate_qml_content(
     threshold: float = 8.0,
     nodata_value: float = -9999.0,
@@ -642,24 +639,20 @@ def create_master_qml(output_root: str, threshold: float = 8.0, nodata_value: fl
     Returns:
         Path to the master QML file
     """
-    global _MASTER_QML_CACHE
-
     # Store master in a _styles folder to keep it organized
     styles_dir = Path(output_root) / "_styles"
     styles_dir.mkdir(exist_ok=True)
     master_qml_path = styles_dir / "density_raster_style_MASTER.qml"
 
-    # Generate content once and cache it
-    if _MASTER_QML_CACHE is None:
-        _MASTER_QML_CACHE = _generate_qml_content(
-            threshold=threshold,
-            nodata_value=nodata_value,
-            classification_min=0.0,
-            classification_max=100.0  # High enough to catch all realistic density values
-        )
+    qml_content = _generate_qml_content(
+        threshold=threshold,
+        nodata_value=nodata_value,
+        classification_min=0.0,
+        classification_max=100.0  # High enough to catch all realistic density values
+    )
 
     # Write master file
-    master_qml_path.write_bytes(_MASTER_QML_CACHE)
+    master_qml_path.write_bytes(qml_content)
 
     # Create a README to explain the setup
     readme_path = styles_dir / "README.txt"
@@ -819,7 +812,6 @@ def sort_tifs_by_utm(lasgrid_out_dir: str, unclipped_root: str):
 # -----------------------------------------------------------------------------
 _WATER_SRC = None
 _TILE_DICT = None
-_WORKER_ZONE = None
 _TILING_ROOT = None
 _PREP_WATER_DIR = None
 _CURRENT_ZONE = None
@@ -834,7 +826,6 @@ def _match_input_pointcloud_for_tif(tif_filename: str):
     Best-effort match from a lasgrid-produced tif name back to the original .laz file.
     Uses _INPUT_FILE_MAP (stem -> path).
     """
-    global _INPUT_FILE_MAP
     if not _INPUT_FILE_MAP:
         return None
 
@@ -963,10 +954,9 @@ def _init_pool(tiling_root: str, prep_water_dir: str, input_file_map: dict, fail
 
 def _ensure_zone_loaded(zone: int):
     """Lazy-load per-zone resources inside each worker process."""
-    global _CURRENT_ZONE, _WATER_SRC, _TILE_DICT, _WORKER_ZONE
+    global _CURRENT_ZONE, _WATER_SRC, _TILE_DICT
 
     if _CURRENT_ZONE == zone and _WATER_SRC is not None and _TILE_DICT is not None:
-        _WORKER_ZONE = zone
         return
 
     _close_worker_sources()
@@ -976,7 +966,6 @@ def _ensure_zone_loaded(zone: int):
     _TILE_DICT = _load_tile_dict_for_zone(_TILING_ROOT, zone)
 
     _CURRENT_ZONE = zone
-    _WORKER_ZONE = zone
 
 def process_raster_task(args):
     if np is None:
@@ -1021,19 +1010,8 @@ def process_raster(raster_path: str, clipped_utm_folder: str, unclipped_utm_fold
 
     Returns (Filename, Result, Info, Time) for log file.
     """
-    global _TILE_DICT
-
     t_start = time.perf_counter()
     filename = os.path.basename(raster_path)
-
-    if RioCRS is None or Affine is None or rasterio is None or fiona is None:
-        try:
-            _import_heavy()
-        except Exception:
-            pass
-        if RioCRS is None or Affine is None or rasterio is None or fiona is None:
-            elapsed = time.perf_counter() - t_start
-            return (filename, "ERROR", f"heavy not ready after import: RioCRS={RioCRS} Affine={Affine} rasterio={rasterio} fiona={fiona}", f"{elapsed:.2f}s")
 
     try:
         if os.path.getsize(raster_path) < 1024:
@@ -1077,10 +1055,6 @@ def process_raster(raster_path: str, clipped_utm_folder: str, unclipped_utm_fold
         # clamp negatives to 0 in-place (no extra array)
         np.maximum(data, 0, out=data)
 
-
-        # We've normalized away nodata; do NOT tell reproject() to treat any value as nodata now.
-        src_nodata = None
-
         if src_crs is None:
             src_crs = RioCRS.from_epsg(EPSG_BY_UTM[utm_tag])
 
@@ -1112,7 +1086,6 @@ def process_raster(raster_path: str, clipped_utm_folder: str, unclipped_utm_fold
             dst_transform=tile_transform,
             dst_crs=src_crs,
             resampling=Resampling.nearest,
-            src_nodata=src_nodata,
             dst_nodata=0
         )
 
@@ -1133,13 +1106,12 @@ def process_raster(raster_path: str, clipped_utm_folder: str, unclipped_utm_fold
         full_tile_data[~tile_mask] = NODATA_VALUE
         final_data = full_tile_data
 
-        # NODATA_VALUE is -9999, so it will never be >= 8.
         total_valid = np.count_nonzero(final_data != NODATA_VALUE)
-        count_ge_8 = np.count_nonzero(final_data >= 8)
-        percent_above_8 = (count_ge_8 / total_valid) * 100 if total_valid > 0 else 0.0
+        count_above = np.count_nonzero(final_data >= DENSITY_THRESHOLD)
+        pct_above = (count_above / total_valid) * 100 if total_valid > 0 else 0.0
 
-        result = "PASS" if percent_above_8 >= 95 else "FAIL"
-        info = f"{percent_above_8:.2f} >=8"
+        result = "PASS" if pct_above >= PASS_PERCENT else "FAIL"
+        info = f"{pct_above:.2f} >={DENSITY_THRESHOLD}"
 
         # Output folder selection (create FAIL folder only if needed)
         clipped_out_dir = clipped_utm_folder if result == "PASS" else os.path.join(clipped_utm_folder, "FAIL")
@@ -1189,7 +1161,7 @@ def process_raster(raster_path: str, clipped_utm_folder: str, unclipped_utm_fold
             try:
                 src_pc = _match_input_pointcloud_for_tif(filename)
                 if src_pc and os.path.isfile(src_pc) and _FAIL_LAZ_ROOT:
-                    utm_subdir = os.path.join(_FAIL_LAZ_ROOT, f"UTM{_WORKER_ZONE:02d}_LAZ")
+                    utm_subdir = os.path.join(_FAIL_LAZ_ROOT, f"UTM{_CURRENT_ZONE:02d}_LAZ")
                     os.makedirs(utm_subdir, exist_ok=True)  # creates LAZ_Density_Fail only if a FAIL happens
                     pc_dest = unique_dest_path(os.path.join(utm_subdir, os.path.basename(src_pc)))
                     shutil.move(src_pc, pc_dest)
@@ -1240,9 +1212,8 @@ def clip_density_grids_parallel(
     os.makedirs(clipped_utm_folder, exist_ok=True)
 
     requested_workers = clamp_workers(workers)
-    effective_workers = min(requested_workers, len(raster_files))
 
-    print(f"[UTM{zone:02d}] Clipping {len(raster_files)} rasters (pool={requested_workers}, needed={effective_workers})")
+    print(f"[UTM{zone:02d}] Clipping {len(raster_files)} rasters (pool={requested_workers}, needed={min(requested_workers, len(raster_files))})")
 
     tasks = [(p, zone, clipped_utm_folder, unclipped_utm_folder) for p in raster_files]
 
@@ -1385,16 +1356,21 @@ def run_density_check(cfg: dict, input_dir, custom_output_dir=None, workers=DEFA
             raise RuntimeError(f"lasgrid produced no .tif files in:\n{lasgrid_out}\nSee:\n{log_path}")
 
 
-        # Clean leftover TIFs from previous runs in Unclipped subdirectories
+        # Record old TIFs BEFORE sorting, so we can safely clean them up AFTER
+        old_tifs = set()
         for old_utm_dir in glob.glob(os.path.join(unclipped_root, "UTM*_Unclipped")):
             for old_tif in glob.glob(os.path.join(old_utm_dir, "*.tif")):
-                try:
-                    os.remove(old_tif)
-                except Exception:
-                    pass
+                old_tifs.add(old_tif)
 
         print("Sorting TIFFs into Unclipped/UTMxx_Unclipped...")
         unclipped_utm_folders = sort_tifs_by_utm(lasgrid_out, unclipped_root)
+
+        # Clean only the old TIFs (new ones are safely in place)
+        for old_tif in old_tifs:
+            try:
+                os.remove(old_tif)
+            except Exception:
+                pass
         t3 = time.perf_counter()
         print(f"[TIMING] sort_tifs: {t3 - t1:.2f}s")
 
@@ -1416,7 +1392,7 @@ def run_density_check(cfg: dict, input_dir, custom_output_dir=None, workers=DEFA
         try:
             master_qml_path = create_master_qml(
                 output_root=output_root,
-                threshold=8.0,
+                threshold=float(DENSITY_THRESHOLD),
                 nodata_value=NODATA_VALUE
             )
             print(f"Master QML: {master_qml_path}")
@@ -1479,26 +1455,26 @@ def run_density_check(cfg: dict, input_dir, custom_output_dir=None, workers=DEFA
             print(f"[TIMING] clipping_total: {t6 - t5:.2f}s")
 
         # ---- Link QML to unclipped tiles ----
-        print("Linking QML styles to unclipped tiles...")
-        try:
-            unclipped_success, unclipped_fail = link_qml_to_directory(unclipped_root, master_qml_path)
-            if unclipped_success > 0:
-                print(f"Linked QML to {unclipped_success} unclipped tiles")
-            if unclipped_fail > 0:
-                warn_msg = f"Failed to link QML to {unclipped_fail} unclipped tiles"
-                errors_encountered.append(warn_msg)
-                print(f"Warning: {warn_msg}")
-        except Exception as e:
-            error_msg = f"QML linking failed: {type(e).__name__}: {e}"
-            errors_encountered.append(error_msg)
-            print(f"ERROR: {error_msg}")
+        if master_qml_path:
+            print("Linking QML styles to unclipped tiles...")
+            try:
+                unclipped_success, unclipped_fail = link_qml_to_directory(unclipped_root, master_qml_path)
+                if unclipped_success > 0:
+                    print(f"Linked QML to {unclipped_success} unclipped tiles")
+                if unclipped_fail > 0:
+                    warn_msg = f"Failed to link QML to {unclipped_fail} unclipped tiles"
+                    errors_encountered.append(warn_msg)
+                    print(f"Warning: {warn_msg}")
+            except Exception as e:
+                error_msg = f"QML linking failed: {type(e).__name__}: {e}"
+                errors_encountered.append(error_msg)
+                print(f"ERROR: {error_msg}")
 
         t7 = time.perf_counter()
         print(f"[TIMING] total: {t7 - t0:.2f}s")
 
         # ---- Write pipeline summary log ----
         log_path = os.path.join(output_root, "density_check_log.txt")
-        from datetime import datetime
         try:
             with open(log_path, "w", encoding="utf-8") as log_file:
                 log_file.write("=" * 80 + "\n")
@@ -1841,26 +1817,29 @@ def launch_gui():
             self.run_btn.config(state='disabled', text='Processing...')
             self.master.update()
 
-            try:
-                input_path = self.input_dir.get().strip()
-                output_path = self.output_dir.get().strip() if self.use_custom_output.get() else None
-                workers = int(self.workers.get())
+            input_path = self.input_dir.get().strip()
+            output_path = self.output_dir.get().strip() if self.use_custom_output.get() else None
+            workers = int(self.workers.get())
 
-                print(f"[RUN] exe={getattr(sys, 'frozen', False)}")
-                print(f"[RUN] sys.executable={sys.executable}")
-                print(f"[RUN] sys.version={sys.version}")
-                print(f"[RUN] workers={workers}")
-                print(f"[RUN] input={input_path}")
-                print(f"[RUN] output={(output_path or input_path)}")
+            print(f"[RUN] exe={getattr(sys, 'frozen', False)}")
+            print(f"[RUN] sys.executable={sys.executable}")
+            print(f"[RUN] sys.version={sys.version}")
+            print(f"[RUN] workers={workers}")
+            print(f"[RUN] input={input_path}")
+            print(f"[RUN] output={(output_path or input_path)}")
 
-                run_density_check(
-                    cfg=self.cfg,
-                    input_dir=input_path,
-                    custom_output_dir=output_path,
-                    workers=workers
-                )
-            finally:
-                self.run_btn.config(state='normal', text='Run Density Check')
+            def _run():
+                try:
+                    run_density_check(
+                        cfg=self.cfg,
+                        input_dir=input_path,
+                        custom_output_dir=output_path,
+                        workers=workers
+                    )
+                finally:
+                    self.master.after(0, lambda: self.run_btn.config(state='normal', text='Run Density Check'))
+
+            threading.Thread(target=_run, daemon=True).start()
 
     root = tk.Tk()
     apply_window_icon(root)

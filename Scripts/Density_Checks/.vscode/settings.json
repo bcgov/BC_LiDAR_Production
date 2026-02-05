@@ -1,0 +1,6 @@
+{
+    "python.defaultInterpreterPath": "C:\\Users\\NSENILOV\\AppData\\Local\\miniconda3\\envs\\geo_env\\python.exe",
+    "python.analysis.extraPaths": [
+        "C:\\Users\\NSENILOV\\AppData\\Local\\miniconda3\\envs\\geo_env\\Lib\\site-packages"
+    ]
+}

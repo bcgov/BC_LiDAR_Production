@@ -138,7 +138,8 @@ def copy_large_file_safe(
 # --- Copy + convert pipeline (background thread) ---
 def run_copy_convert_pipeline(source_dir, dest_dir, max_conversions, num_cores,
                               skip_existing, status_var, copied_count_var, converted_count_var,
-                              start_button, copy_progress_var, copy_speed_var, copy_file_var):
+                              start_button, copy_progress_var, copy_speed_var, copy_file_var,
+                              do_copy=True, do_convert=True, do_organize=True, do_macros=True):
     copied_count = 0
     converted_count = 0
     total_tiles = 0
@@ -215,78 +216,135 @@ def run_copy_convert_pipeline(source_dir, dest_dir, max_conversions, num_cores,
         print(message)
         root.after(0, lambda: (status_var.set("Error"), messagebox.showerror(title, message)))
 
-    update_status("Copying tiles...")
-
     try:
         start_time = time.time()
-        with ThreadPoolExecutor(max_workers=max_conversions) as executor:
-            conversion_started = False
-            laz_files = sorted(f for f in os.listdir(source_dir) if f.lower().endswith(".laz"))
-            total_tiles = len(laz_files)
-            reset_copy_ui(total_tiles)
-            if not laz_files:
-                update_status("No .laz files found in source.")
-                root.after(0, lambda: messagebox.showinfo(
-                    "No tiles",
-                    "No .laz files found in the source folder."
-                ))
-                return
-            for filename in laz_files:
-                src_path = os.path.join(source_dir, filename)
-                dest_path = os.path.join(dest_dir, filename)
-                las_output_path = os.path.join(las_root, f"{os.path.splitext(filename)[0]}.las")
 
-                if skip_existing and os.path.exists(dest_path):
-                    print(f"Skipping copy (exists): {dest_path}")
-                    update_copy_file(f"Skipping {filename}")
-                    update_counts(copied_delta=1)
-                else:
-                    bytes_copied, _ = copy_large_file_safe(
-                        src_path,
-                        dest_path,
-                        progress_cb=make_progress_cb(filename),
-                        status_cb=make_status_cb(),
-                        update_interval=0.25
-                    )
-                    if bytes_copied is None:
-                        show_error("Copy Error", f"Failed to copy: {src_path}")
-                        continue
-                    update_counts(copied_delta=1)
+        # Phase 1 & 2: Copy and/or Convert
+        if do_copy or do_convert:
+            with ThreadPoolExecutor(max_workers=max_conversions) as executor:
+                if do_copy:
+                    update_status("Copying tiles...")
+                    laz_files = sorted(f for f in os.listdir(source_dir) if f.lower().endswith(".laz"))
+                    total_tiles = len(laz_files)
+                    reset_copy_ui(total_tiles)
+                    if not laz_files:
+                        update_status("No .laz files found in source.")
+                        root.after(0, lambda: messagebox.showinfo(
+                            "No tiles",
+                            "No .laz files found in the source folder."
+                        ))
+                        return
+                    conversion_started = False
+                    for filename in laz_files:
+                        src_path = os.path.join(source_dir, filename)
+                        dest_path = os.path.join(dest_dir, filename)
+                        las_output_path = os.path.join(las_root, f"{os.path.splitext(filename)[0]}.las")
 
-                if skip_existing and os.path.exists(las_output_path):
-                    print(f"Skipping conversion (exists): {las_output_path}")
-                    continue
-
-                if not conversion_started:
-                    update_status("Converting tiles...")
-                    conversion_started = True
-                future = executor.submit(convert_one_laz_to_las, dest_path, las_root, num_cores)
-
-                def _conversion_done(f):
-                    try:
-                        result = f.result()
-                        if result:
-                            update_counts(converted_delta=1)
+                        if skip_existing and os.path.exists(dest_path):
+                            print(f"Skipping copy (exists): {dest_path}")
+                            update_copy_file(f"Skipping {filename}")
+                            update_counts(copied_delta=1)
                         else:
-                            show_error("Conversion Error", "Conversion failed. See console for details.")
-                    except Exception as e:
-                        show_error("Conversion Error", f"Conversion error: {e}")
+                            bytes_copied, _ = copy_large_file_safe(
+                                src_path,
+                                dest_path,
+                                progress_cb=make_progress_cb(filename),
+                                status_cb=make_status_cb(),
+                                update_interval=0.25
+                            )
+                            if bytes_copied is None:
+                                show_error("Copy Error", f"Failed to copy: {src_path}")
+                                continue
+                            update_counts(copied_delta=1)
 
-                future.add_done_callback(_conversion_done)
+                        if do_convert:
+                            if skip_existing and os.path.exists(las_output_path):
+                                print(f"Skipping conversion (exists): {las_output_path}")
+                                continue
+
+                            if not conversion_started:
+                                update_status("Converting tiles...")
+                                conversion_started = True
+                            future = executor.submit(convert_one_laz_to_las, dest_path, las_root, num_cores)
+
+                            def _conversion_done(f):
+                                try:
+                                    result = f.result()
+                                    if result:
+                                        update_counts(converted_delta=1)
+                                    else:
+                                        show_error("Conversion Error", "Conversion failed. See console for details.")
+                                except Exception as e:
+                                    show_error("Conversion Error", f"Conversion error: {e}")
+
+                            future.add_done_callback(_conversion_done)
+
+                elif do_convert:
+                    # Convert-only mode: process existing LAZ files in dest_dir
+                    update_status("Converting tiles...")
+                    laz_files = sorted(f for f in os.listdir(dest_dir) if f.lower().endswith(".laz"))
+                    total_tiles = len(laz_files)
+                    reset_copy_ui(total_tiles)
+                    if not laz_files:
+                        update_status("No .laz files found in destination.")
+                        root.after(0, lambda: messagebox.showinfo(
+                            "No tiles",
+                            "No .laz files found in the destination folder."
+                        ))
+                        return
+
+                    for filename in laz_files:
+                        laz_path = os.path.join(dest_dir, filename)
+                        las_output_path = os.path.join(las_root, f"{os.path.splitext(filename)[0]}.las")
+
+                        if skip_existing and os.path.exists(las_output_path):
+                            print(f"Skipping conversion (exists): {las_output_path}")
+                            continue
+
+                        future = executor.submit(convert_one_laz_to_las, laz_path, las_root, num_cores)
+
+                        def _conversion_done(f):
+                            try:
+                                result = f.result()
+                                if result:
+                                    update_counts(converted_delta=1)
+                                else:
+                                    show_error("Conversion Error", "Conversion failed. See console for details.")
+                            except Exception as e:
+                                show_error("Conversion Error", f"Conversion error: {e}")
+
+                        future.add_done_callback(_conversion_done)
+
         if error_flag:
             return
-        update_status("Generating macros...")
-        subdirs = organize_las_files(las_root)
-        for subdir in subdirs:
-            unique_point_source_ids = list_point_source_ids(subdir)
-            subdir_name = os.path.basename(subdir)
 
-            if subdir_name == "Urban":
-                create_macro_and_prj_urban(subdir, unique_point_source_ids)
-            elif subdir_name == "Regular":
-                create_macro_and_prj(subdir, unique_point_source_ids)
-            else:
-                create_macro_and_prj(subdir, unique_point_source_ids)
+        # Phase 3: Organize
+        if do_organize:
+            update_status("Organizing files...")
+            subdirs = organize_las_files(las_root)
+        else:
+            subdirs = []
+            for name in ("Urban", "Regular"):
+                d = os.path.join(las_root, name)
+                if os.path.isdir(d):
+                    subdirs.append(d)
+            if not subdirs:
+                subdirs = [las_root]
+
+        # Phase 4: Generate macros
+        if do_macros:
+            update_status("Generating macros...")
+            for subdir in subdirs:
+                unique_point_source_ids = list_point_source_ids(subdir)
+                subdir_name = os.path.basename(subdir)
+
+                if subdir_name == "Urban":
+                    create_macro_and_prj_urban(subdir, unique_point_source_ids)
+                elif subdir_name == "Regular":
+                    create_macro_and_prj(subdir, unique_point_source_ids)
+                else:
+                    create_macro_and_prj(subdir, unique_point_source_ids)
+
         elapsed_time = time.time() - start_time
         print_rainbow_dashes()
         print(f"Processing took {elapsed_time:.2f} seconds.")
@@ -512,7 +570,7 @@ def create_macro_and_prj_urban(directory, unique_point_source_ids):
         "FnScanClassifyClass(\"Any\",0,0)",
         "FnScanThinPoints(\"Any\",9997,2,0,0.001,0.001,0)",
         "FnScanClassifyIsolated(\"0\",7,5,\"0\",3.00,0)"
-    ]
+    ] 
 
     for point_id in unique_point_source_ids:
         macro_content.append("Keyin: scan display view=1/lineoff=all")
@@ -642,32 +700,46 @@ def organize_las_files(las_directory):
     return [regular_dir, urban_dir]
 
 # --- Main processing logic ---
-def create_macro_file(directory, num_cores):
+def create_macro_file(directory, num_cores, do_convert=True, do_organize=True, do_macros=True):
     start_time = time.time()
-    las_directory = convert_laz_to_las(directory, num_cores)
-    if not las_directory:
-        messagebox.showerror("Error", "Failed to convert .laz files to .las.")
-        return
 
-    subdirs = organize_las_files(las_directory)
+    if do_convert:
+        las_directory = convert_laz_to_las(directory, num_cores)
+        if not las_directory:
+            messagebox.showerror("Error", "Failed to convert .laz files to .las.")
+            return
+    else:
+        candidate = os.path.join(directory, "LAS")
+        las_directory = candidate if os.path.isdir(candidate) else directory
 
-    for subdir in subdirs:
-        unique_point_source_ids = list_point_source_ids(subdir)
-        subdir_name = os.path.basename(subdir)
-        
-        if subdir_name == "Urban":
-            create_macro_and_prj_urban(subdir, unique_point_source_ids)
-        elif subdir_name == "Regular":
-            create_macro_and_prj(subdir, unique_point_source_ids)
-        else:
-            # fallback if only one folder (no urban found)
-            create_macro_and_prj(subdir, unique_point_source_ids)
+    if do_organize:
+        subdirs = organize_las_files(las_directory)
+    else:
+        subdirs = []
+        for name in ("Urban", "Regular"):
+            d = os.path.join(las_directory, name)
+            if os.path.isdir(d):
+                subdirs.append(d)
+        if not subdirs:
+            subdirs = [las_directory]
+
+    if do_macros:
+        for subdir in subdirs:
+            unique_point_source_ids = list_point_source_ids(subdir)
+            subdir_name = os.path.basename(subdir)
+
+            if subdir_name == "Urban":
+                create_macro_and_prj_urban(subdir, unique_point_source_ids)
+            elif subdir_name == "Regular":
+                create_macro_and_prj(subdir, unique_point_source_ids)
+            else:
+                create_macro_and_prj(subdir, unique_point_source_ids)
 
     elapsed_time = time.time() - start_time
     print_rainbow_dashes()
     print(f"Processing took {elapsed_time:.2f} seconds.")
     paths_text = "\n".join(subdirs)
-    messagebox.showinfo("Success", f"Macro and PRJ files created in:\n{paths_text}")
+    messagebox.showinfo("Success", f"Processing complete!\nDirectories:\n{paths_text}")
 
 # --- GUI setup ---
 def select_directory():
@@ -685,7 +757,10 @@ def on_create_macro_file():
     except ValueError:
         messagebox.showerror("Error", "Invalid number of cores selected.")
         return
-    create_macro_file(directory, num_cores)
+    create_macro_file(directory, num_cores,
+                      do_convert=wf_a_convert_var.get(),
+                      do_organize=wf_a_organize_var.get(),
+                      do_macros=wf_a_macros_var.get())
 
 def _check_directory_access(path, require_write=False):
     if not os.path.isdir(path):
@@ -707,21 +782,35 @@ def select_dest_directory():
         dest_directory_path.set(directory)
 
 def on_start_copy_convert():
-    source_dir = source_directory_path.get()
-    dest_dir = dest_directory_path.get()
-    source_dir = os.path.normpath(source_directory_path.get())
-    dest_dir   = os.path.normpath(dest_directory_path.get())
-    if not source_dir or not dest_dir:
-        messagebox.showerror("Error", "Please select both source and destination folders.")
+    do_copy = wf_b_copy_var.get()
+    do_convert = wf_b_convert_var.get()
+    do_organize = wf_b_organize_var.get()
+    do_macros = wf_b_macros_var.get()
+
+    raw_source = source_directory_path.get().strip()
+    raw_dest   = dest_directory_path.get().strip()
+
+    if not raw_dest:
+        messagebox.showerror("Error", "Please select a destination folder.")
         return
-    if os.path.abspath(source_dir) == os.path.abspath(dest_dir):
-        messagebox.showerror("Error", "Source and destination folders must be different.")
-        return
-    ok, msg = _check_directory_access(source_dir, require_write=False)
-    if not ok:
-        print(msg)
-        messagebox.showerror("Error", msg)
-        return
+    dest_dir = os.path.normpath(raw_dest)
+
+    if do_copy:
+        if not raw_source:
+            messagebox.showerror("Error", "Please select a source folder.")
+            return
+        source_dir = os.path.normpath(raw_source)
+        if os.path.abspath(source_dir) == os.path.abspath(dest_dir):
+            messagebox.showerror("Error", "Source and destination folders must be different.")
+            return
+        ok, msg = _check_directory_access(source_dir, require_write=False)
+        if not ok:
+            print(msg)
+            messagebox.showerror("Error", msg)
+            return
+    else:
+        source_dir = os.path.normpath(raw_source) if raw_source else ""
+
     ok, msg = _check_directory_access(dest_dir, require_write=True)
     if not ok:
         print(msg)
@@ -740,7 +829,7 @@ def on_start_copy_convert():
 
     copied_count_var.set("0")
     converted_count_var.set("0")
-    status_var.set("Starting copy + convert...")
+    status_var.set("Starting...")
     start_copy_convert_button.config(state=tk.DISABLED)
     root.after(0, lambda: (
         copy_progress_var.set("Downloaded: 0/0 (0 left)"),
@@ -749,19 +838,20 @@ def on_start_copy_convert():
     ))
 
     las_root = os.path.join(dest_dir, "LAS")
-    existing_files = [f for f in os.listdir(dest_dir) if f.lower().endswith(".laz")]
-    existing_las = []
-    if os.path.isdir(las_root):
-        existing_las = [f for f in os.listdir(las_root) if f.lower().endswith(".las")]
     skip_existing = False
-    if existing_files or existing_las:
-        overwrite = messagebox.askyesno(
-            "Existing Files Found",
-            "Destination folder contains .laz/.las files.\n\n"
-            "Yes = overwrite existing\n"
-            "No = skip existing"
-        )
-        skip_existing = not overwrite
+    if do_copy or do_convert:
+        existing_files = [f for f in os.listdir(dest_dir) if f.lower().endswith(".laz")] if os.path.isdir(dest_dir) else []
+        existing_las = []
+        if os.path.isdir(las_root):
+            existing_las = [f for f in os.listdir(las_root) if f.lower().endswith(".las")]
+        if existing_files or existing_las:
+            overwrite = messagebox.askyesno(
+                "Existing Files Found",
+                "Destination folder contains .laz/.las files.\n\n"
+                "Yes = overwrite existing\n"
+                "No = skip existing"
+            )
+            skip_existing = not overwrite
 
     worker = threading.Thread(
         target=run_copy_convert_pipeline,
@@ -777,7 +867,11 @@ def on_start_copy_convert():
             start_copy_convert_button,
             copy_progress_var,
             copy_speed_var,
-            copy_file_var
+            copy_file_var,
+            do_copy,
+            do_convert,
+            do_organize,
+            do_macros
         ),
         daemon=True
     )
@@ -794,8 +888,8 @@ root.iconbitmap(icon_path)
 root.resizable(True, True)
 
 # A nicer default size for the new 2-column layout
-root.geometry("920x430")
-root.minsize(840, 400)
+root.geometry("920x520")
+root.minsize(840, 480)
 
 # Use a native-ish theme if available
 style = ttk.Style()
@@ -828,6 +922,17 @@ copy_progress_var     = tk.StringVar(value="0/0 (0 left)")
 copy_speed_var        = tk.StringVar(value="Speed: -- MiB/s")
 copy_file_var         = tk.StringVar(value="")
 
+# Step toggle variables — Workflow A (all on by default)
+wf_a_convert_var  = tk.BooleanVar(value=True)
+wf_a_organize_var = tk.BooleanVar(value=True)
+wf_a_macros_var   = tk.BooleanVar(value=True)
+
+# Step toggle variables — Workflow B (all on by default)
+wf_b_copy_var     = tk.BooleanVar(value=True)
+wf_b_convert_var  = tk.BooleanVar(value=True)
+wf_b_organize_var = tk.BooleanVar(value=True)
+wf_b_macros_var   = tk.BooleanVar(value=True)
+
 # Root grid config
 root.columnconfigure(0, weight=1)
 root.rowconfigure(0, weight=1)
@@ -858,12 +963,26 @@ dir_entry.grid(row=0, column=0, sticky="ew")
 
 ttk.Button(a_path_row, text="Browse…", command=select_directory).grid(row=0, column=1, padx=(8, 0))
 
-ttk.Label(left, text="Cores (LAStools):").grid(row=2, column=0, sticky="w")
-cores_combo = ttk.Combobox(left, textvariable=cores_var, values=[str(i) for i in range(1, 9)], state="readonly", width=6)
-cores_combo.grid(row=2, column=1, sticky="w", pady=(2, 10))
-ttk.Label(left, text="(batch convert; ID scan uses same value)").grid(row=2, column=2, sticky="w", padx=(8, 0), pady=(2, 10))
+cores_wrap = ttk.Frame(left)
+cores_wrap.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(2, 10))
+cores_wrap.columnconfigure(0, weight=1)
 
-ttk.Button(left, text="Create Macro File", command=on_create_macro_file).grid(row=3, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+cores_inner = ttk.Frame(cores_wrap)
+cores_inner.grid(row=0, column=0)
+
+ttk.Label(cores_inner, text="Cores (LAStools):").grid(row=0, column=0, sticky="w")
+cores_combo = ttk.Combobox(cores_inner, textvariable=cores_var, values=[str(i) for i in range(1, 9)], state="readonly", width=6)
+cores_combo.grid(row=0, column=1, sticky="w", padx=(6, 6))
+ttk.Label(cores_inner, text="(batch convert; ID scan uses same value)").grid(row=0, column=2, sticky="w")
+
+# Step checkboxes — Workflow A
+steps_a = ttk.LabelFrame(left, text="Steps")
+steps_a.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(2, 6))
+ttk.Checkbutton(steps_a, text="Convert LAZ \u2192 LAS", variable=wf_a_convert_var).grid(row=0, column=0, sticky="w", padx=(4, 16))
+ttk.Checkbutton(steps_a, text="Organize Urban / Regular", variable=wf_a_organize_var).grid(row=0, column=1, sticky="w", padx=(4, 16))
+ttk.Checkbutton(steps_a, text="Generate Macros & PRJ", variable=wf_a_macros_var).grid(row=1, column=0, sticky="w", padx=(4, 16))
+
+ttk.Button(left, text="Create Macro File", command=on_create_macro_file).grid(row=4, column=0, columnspan=3, sticky="ew", pady=(6, 0))
 
 # ---------- RIGHT: Copy + convert pipeline ----------
 right = ttk.LabelFrame(main, text="Workflow B — Copy From Network → Convert → Generate Macro")
@@ -892,17 +1011,32 @@ dst_entry.grid(row=0, column=0, sticky="ew")
 
 ttk.Button(b_dst_row, text="Browse…", command=select_dest_directory).grid(row=0, column=1, padx=(8, 0))
 
-ttk.Label(right, text="Cores (Parallel tiles):").grid(row=4, column=0, sticky="w")
-max_combo = ttk.Combobox(right, textvariable=max_conversions_var, values=[str(i) for i in range(1, 9)], state="readonly", width=6)
-max_combo.grid(row=4, column=1, sticky="w", pady=(2, 10))
-ttk.Label(right, text="(tiles convert in parallel; ID scan uses same value)").grid(row=4, column=2, sticky="w", padx=(8, 0), pady=(2, 10))
+cores_wrap_b = ttk.Frame(right)
+cores_wrap_b.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(2, 10))
+cores_wrap_b.columnconfigure(0, weight=1)
+
+cores_inner_b = ttk.Frame(cores_wrap_b)
+cores_inner_b.grid(row=0, column=0)
+
+ttk.Label(cores_inner_b, text="Cores (Parallel tiles):").grid(row=0, column=0, sticky="w")
+max_combo = ttk.Combobox(cores_inner_b, textvariable=max_conversions_var, values=[str(i) for i in range(1, 9)], state="readonly", width=6)
+max_combo.grid(row=0, column=1, sticky="w", padx=(6, 6))
+ttk.Label(cores_inner_b, text="(tiles convert in parallel; ID scan uses same value)").grid(row=0, column=2, sticky="w")
+
+# Step checkboxes — Workflow B
+steps_b = ttk.LabelFrame(right, text="Steps")
+steps_b.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(2, 6))
+ttk.Checkbutton(steps_b, text="Copy LAZ tiles", variable=wf_b_copy_var).grid(row=0, column=0, sticky="w", padx=(4, 16))
+ttk.Checkbutton(steps_b, text="Convert LAZ \u2192 LAS", variable=wf_b_convert_var).grid(row=0, column=1, sticky="w", padx=(4, 16))
+ttk.Checkbutton(steps_b, text="Organize Urban / Regular", variable=wf_b_organize_var).grid(row=1, column=0, sticky="w", padx=(4, 16))
+ttk.Checkbutton(steps_b, text="Generate Macros & PRJ", variable=wf_b_macros_var).grid(row=1, column=1, sticky="w", padx=(4, 16))
 
 start_copy_convert_button = ttk.Button(right, text="Start Copy + Convert", command=on_start_copy_convert)
-start_copy_convert_button.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+start_copy_convert_button.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(6, 0))
 
-ttk.Label(right, textvariable=copy_progress_var).grid(row=6, column=0, columnspan=3, sticky="w", pady=(6, 0))
-ttk.Label(right, textvariable=copy_file_var).grid(row=7, column=0, columnspan=3, sticky="w")
-ttk.Label(right, textvariable=copy_speed_var).grid(row=8, column=0, columnspan=3, sticky="w", pady=(0, 4))
+ttk.Label(right, textvariable=copy_progress_var).grid(row=7, column=0, columnspan=3, sticky="w", pady=(6, 0))
+ttk.Label(right, textvariable=copy_file_var).grid(row=8, column=0, columnspan=3, sticky="w")
+ttk.Label(right, textvariable=copy_speed_var).grid(row=9, column=0, columnspan=3, sticky="w", pady=(0, 4))
 
 # ---------- Bottom status bar (spans both columns) ----------
 status_bar = ttk.Frame(main, padding=(8, 10))
