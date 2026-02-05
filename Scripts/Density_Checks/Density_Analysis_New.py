@@ -975,7 +975,6 @@ def process_raster_task(args):
     return process_raster(raster_path, clipped_utm_folder, unclipped_utm_folder)
 
 def _rasterize_water_mask(tile_bounds, out_shape, transform):
-    global _WATER_SRC
     if _WATER_SRC is None:
         return np.zeros(out_shape, dtype=bool)
 
