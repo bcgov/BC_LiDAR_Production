@@ -323,6 +323,18 @@ def _set_env_dir(varname: str, candidates):
             return str(p)
     return None
 
+# When frozen, always force bundled data paths first — PyInstaller hooks
+# (e.g. pyproj) may pre-set PROJ_LIB/PROJ_DATA to Library/share/proj before
+# our code runs, bypassing the bundled data/proj directory.
+if getattr(sys, "frozen", False):
+    _bundled_gdal = DATA_ROOT / "gdal"
+    _bundled_proj = DATA_ROOT / "proj"
+    if _bundled_gdal.is_dir():
+        os.environ["GDAL_DATA"] = str(_bundled_gdal)
+    if _bundled_proj.is_dir():
+        os.environ["PROJ_LIB"] = str(_bundled_proj)
+        os.environ["PROJ_DATA"] = str(_bundled_proj)
+
 env_prefix = Path(sys.prefix)
 exe = Path(sys.executable)
 conda_root = exe.parents[2] if len(exe.parents) >= 3 else env_prefix
@@ -368,7 +380,7 @@ Affine = None
 
 def _import_heavy():
     global np, fiona, rasterio, rasterize, geom_bounds, reproject, Resampling
-    global from_bounds, RioCRS, Affine  # <-- ADD THIS
+    global from_bounds, RioCRS, Affine
 
     if np is not None and RioCRS is not None and Affine is not None:
         return
@@ -452,6 +464,325 @@ def assert_required_assets(cfg: dict):
         raise FileNotFoundError("\n\n".join(missing))
 
 # -----------------------------------------------------------------------------
+# QML sidecar generation for QGIS auto-styling (SINGLE MASTER FILE APPROACH)
+# -----------------------------------------------------------------------------
+_MASTER_QML_CACHE = None  # Cache the QML XML content to avoid regenerating
+
+def _generate_qml_content(
+    threshold: float = 8.0,
+    nodata_value: float = -9999.0,
+    classification_min: float = 0.0,
+    classification_max: float = 20.0
+) -> bytes:
+    """
+    Generate QML XML content (not written to file yet).
+
+    Returns:
+        QML XML content as bytes (UTF-8 encoded)
+    """
+    import xml.etree.ElementTree as ET
+    from xml.dom import minidom
+
+    # Use a cutoff slightly below threshold to ensure proper binning
+    cutoff = threshold - 0.0001
+
+    # Build QML XML structure
+    qgis = ET.Element('qgis', {
+        'version': '3.28.0',
+        'styleCategories': 'AllStyleCategories'
+    })
+
+    # Pipe element (rendering settings)
+    pipe = ET.SubElement(qgis, 'pipe')
+    pipe_properties = ET.SubElement(pipe, 'pipe-properties')
+    ET.SubElement(pipe_properties, 'Option', {'type': 'Map'})
+
+    # Raster renderer (pseudocolor)
+    rasterrenderer = ET.SubElement(pipe, 'rasterrenderer', {
+        'type': 'singlebandpseudocolor',
+        'opacity': '1',
+        'alphaBand': '-1',
+        'band': '1',
+        'nodataColor': '',
+        'classificationMin': str(classification_min),
+        'classificationMax': str(classification_max)
+    })
+
+    # Raster transparency (handle nodata)
+    rastertransparency = ET.SubElement(rasterrenderer, 'rasterTransparency')
+    singleValuePixelList = ET.SubElement(rastertransparency, 'singleValuePixelList')
+    ET.SubElement(singleValuePixelList, 'pixelListEntry', {
+        'min': str(nodata_value),
+        'max': str(nodata_value),
+        'percentTransparent': '100'
+    })
+
+    # Min/Max origin
+    minmaxorigin = ET.SubElement(rasterrenderer, 'minMaxOrigin')
+    ET.SubElement(minmaxorigin, 'limits').text = 'None'
+    ET.SubElement(minmaxorigin, 'extent').text = 'WholeRaster'
+    ET.SubElement(minmaxorigin, 'statAccuracy').text = 'Estimated'
+    ET.SubElement(minmaxorigin, 'cumulativeCutLower').text = '0.02'
+    ET.SubElement(minmaxorigin, 'cumulativeCutUpper').text = '0.98'
+    ET.SubElement(minmaxorigin, 'stdDevFactor').text = '2'
+
+    # Color ramp shader (DISCRETE mode with graduated colors)
+    rastershader = ET.SubElement(rasterrenderer, 'rastershader')
+    colorrampshader = ET.SubElement(rastershader, 'colorrampshader', {
+        'colorRampType': 'DISCRETE',
+        'classificationMode': '1',
+        'clip': '0',
+        'minimumValue': str(classification_min),
+        'maximumValue': str(classification_max)
+    })
+
+    # Graduated color ramp showing density quality
+    # RED GRADIENT (< 8.0) - darker = worse failure
+    ET.SubElement(colorrampshader, 'item', {
+        'alpha': '255',
+        'value': '2.0',
+        'label': '0-2 (Critical)',
+        'color': '#8B0000'  # Dark red
+    })
+
+    ET.SubElement(colorrampshader, 'item', {
+        'alpha': '255',
+        'value': '4.0',
+        'label': '2-4 (Very Low)',
+        'color': '#CD0000'  # Medium-dark red
+    })
+
+    ET.SubElement(colorrampshader, 'item', {
+        'alpha': '255',
+        'value': '6.0',
+        'label': '4-6 (Low)',
+        'color': '#FF0000'  # Bright red
+    })
+
+    ET.SubElement(colorrampshader, 'item', {
+        'alpha': '255',
+        'value': str(cutoff),  # 7.9999
+        'label': '6-8 (Near Threshold)',
+        'color': '#FF6B6B'  # Light red
+    })
+
+    # GREEN GRADIENT (>= 8.0) - darker = better quality
+    ET.SubElement(colorrampshader, 'item', {
+        'alpha': '255',
+        'value': '10.0',
+        'label': '8-10 (Pass)',
+        'color': '#90EE90'  # Light green
+    })
+
+    ET.SubElement(colorrampshader, 'item', {
+        'alpha': '255',
+        'value': '12.0',
+        'label': '10-12 (Good)',
+        'color': '#00FF00'  # Bright green
+    })
+
+    ET.SubElement(colorrampshader, 'item', {
+        'alpha': '255',
+        'value': '15.0',
+        'label': '12-15 (Very Good)',
+        'color': '#00CD00'  # Medium-dark green
+    })
+
+    ET.SubElement(colorrampshader, 'item', {
+        'alpha': '255',
+        'value': str(classification_max),  # Now 100.0 to catch all realistic density values
+        'label': f'15+ (Excellent)',
+        'color': '#008B00'  # Dark green
+    })
+
+    # Brightness/Contrast/Saturation
+    ET.SubElement(pipe, 'brightnesscontrast', {
+        'brightness': '0',
+        'contrast': '0',
+        'gamma': '1'
+    })
+
+    # Hue/Saturation
+    ET.SubElement(pipe, 'huesaturation', {
+        'colorizeGreen': '128',
+        'colorizeOn': '0',
+        'colorizeRed': '255',
+        'colorizeBlue': '128',
+        'colorizeStrength': '100',
+        'saturation': '0',
+        'grayscaleMode': '0'
+    })
+
+    # Raster resampler
+    ET.SubElement(pipe, 'rasterresampler', {
+        'maxOversampling': '2'
+    })
+
+    # Resample filter
+    ET.SubElement(pipe, 'resamplingStage', {
+        'resamplingFilter': 'bilinear'
+    })
+
+    # Blend mode
+    ET.SubElement(qgis, 'blendMode').text = '0'
+
+    # Pretty-print XML
+    rough_string = ET.tostring(qgis, encoding='unicode')
+    reparsed = minidom.parseString(rough_string)
+    return reparsed.toprettyxml(indent='  ', encoding='utf-8')
+
+
+def create_master_qml(output_root: str, threshold: float = 8.0, nodata_value: float = -9999.0) -> str:
+    """
+    Create ONE master QML file in a _styles subdirectory.
+
+    The master file is the single source of truth. All per-raster .qml files
+    are hard-linked to this master, so editing the master updates all styles.
+
+    Returns:
+        Path to the master QML file
+    """
+    global _MASTER_QML_CACHE
+
+    # Store master in a _styles folder to keep it organized
+    styles_dir = Path(output_root) / "_styles"
+    styles_dir.mkdir(exist_ok=True)
+    master_qml_path = styles_dir / "density_raster_style_MASTER.qml"
+
+    # Generate content once and cache it
+    if _MASTER_QML_CACHE is None:
+        _MASTER_QML_CACHE = _generate_qml_content(
+            threshold=threshold,
+            nodata_value=nodata_value,
+            classification_min=0.0,
+            classification_max=100.0  # High enough to catch all realistic density values
+        )
+
+    # Write master file
+    master_qml_path.write_bytes(_MASTER_QML_CACHE)
+
+    # Create a README to explain the setup
+    readme_path = styles_dir / "README.txt"
+    readme_content = f"""QGIS Style Configuration
+=========================
+
+This folder contains the MASTER style file for all density rasters.
+
+Master Style File:
+  {master_qml_path.name}
+
+How It Works:
+- Each .tif file in Water_Clipped/ AND Unclipped/ has a matching .qml file next to it
+- All those .qml files are HARD LINKS to this master file (not copies)
+- They share the same disk space (~5KB total, not 5KB per raster)
+- Editing the master file updates ALL raster styles automatically (both clipped and unclipped)
+
+Current Style (Graduated Colors):
+RED GRADIENT (< {threshold:.1f} - FAIL):
+  - 0-2:   Dark Red     (Critical - very poor density)
+  - 2-4:   Medium Red   (Very Low)
+  - 4-6:   Bright Red   (Low)
+  - 6-8:   Light Red    (Near Threshold)
+
+GREEN GRADIENT (>= {threshold:.1f} - PASS):
+  - 8-10:  Light Green  (Pass)
+  - 10-12: Bright Green (Good)
+  - 12-15: Medium Green (Very Good)
+  - 15+:   Dark Green   (Excellent)
+
+NODATA: Transparent ({nodata_value}) for water bodies
+
+To Change Colors:
+1. Open {master_qml_path.name} in a text editor
+2. Find <item> elements with color='#xxxxxx' attributes
+3. Change hex colors (e.g., #8B0000 to #990000)
+4. Adjust value='x.x' thresholds if needed
+5. Save the file
+6. All linked .qml files update instantly
+7. Reload rasters in QGIS to see new colors
+
+Note: The per-raster .qml files MUST stay next to their .tif files
+      for QGIS auto-styling to work on drag-and-drop.
+"""
+    readme_path.write_text(readme_content, encoding='utf-8')
+
+    return str(master_qml_path)
+
+
+def link_qml_to_raster(tif_path: str, master_qml_path: str) -> tuple:
+    """
+    Create a hard link (or copy as fallback) from master QML to raster-specific QML.
+
+    Hard links appear as separate files but share the same disk space.
+    Editing the master updates all linked files.
+
+    Args:
+        tif_path: Path to the raster .tif file
+        master_qml_path: Path to the master QML file
+
+    Returns:
+        (success: bool, message: str)
+    """
+    try:
+        tif_path = Path(tif_path)
+        master_qml_path = Path(master_qml_path)
+
+        if not tif_path.exists():
+            return False, f"Raster not found: {tif_path}"
+        if not master_qml_path.exists():
+            return False, f"Master QML not found: {master_qml_path}"
+
+        qml_path = tif_path.with_suffix('.qml')
+
+        # Remove existing QML if present
+        if qml_path.exists():
+            try:
+                qml_path.unlink()
+            except Exception:
+                pass
+
+        # Try hard link first (Windows: no admin required, shares disk space)
+        try:
+            os.link(master_qml_path, qml_path)
+            return True, "QML_LINKED"
+        except (OSError, NotImplementedError):
+            # Fallback: copy the file (small overhead ~5KB per file)
+            try:
+                shutil.copy2(master_qml_path, qml_path)
+                return True, "QML_COPIED"
+            except Exception as copy_err:
+                return False, f"QML_LINK_FAILED: {copy_err}"
+
+    except Exception as e:
+        return False, f"QML_ERROR: {type(e).__name__}: {e}"
+
+
+def link_qml_to_directory(directory: str, master_qml_path: str) -> tuple:
+    """
+    Link master QML to all .tif files in a directory (including subdirectories).
+
+    Args:
+        directory: Directory containing .tif files
+        master_qml_path: Path to the master QML file
+
+    Returns:
+        (success_count: int, fail_count: int)
+    """
+    success_count = 0
+    fail_count = 0
+
+    tif_files = glob.glob(os.path.join(directory, "**", "*.tif"), recursive=True)
+
+    for tif_path in tif_files:
+        qml_ok, qml_msg = link_qml_to_raster(tif_path, master_qml_path)
+        if qml_ok:
+            success_count += 1
+        else:
+            fail_count += 1
+
+    return success_count, fail_count
+
+# -----------------------------------------------------------------------------
 # Output naming
 # -----------------------------------------------------------------------------
 def utm_folder_name(zone: int, kind: str) -> str:
@@ -493,13 +824,14 @@ _TILING_ROOT = None
 _PREP_WATER_DIR = None
 _CURRENT_ZONE = None
 
-_INPUT_FILE_MAP = None  # stem(lower) -> full path to .laz/.las
+_INPUT_FILE_MAP = None  # stem(lower) -> full path to .laz
 _FAIL_LAZ_ROOT = None   # e.g. C:\...\input\LAZ_Density_Fail
+_MASTER_QML_PATH = None  # Path to the master QML file for linking
 
 
 def _match_input_pointcloud_for_tif(tif_filename: str):
     """
-    Best-effort match from a lasgrid-produced tif name back to the original .laz/.las.
+    Best-effort match from a lasgrid-produced tif name back to the original .laz file.
     Uses _INPUT_FILE_MAP (stem -> path).
     """
     global _INPUT_FILE_MAP
@@ -610,14 +942,22 @@ def _load_tile_dict_for_zone(tiling_root: str, utm_zone: int) -> dict:
 
     return out
 
-def _init_pool(tiling_root: str, prep_water_dir: str, input_file_map: dict, fail_laz_root: str):
-    _import_heavy()  # each worker loads numpy/fiona/rasterio + assigns module globals
+def _init_pool(tiling_root: str, prep_water_dir: str, input_file_map: dict, fail_laz_root: str, master_qml_path: str):
+    try:
+        _import_heavy()  # each worker loads numpy/fiona/rasterio + assigns module globals
+    except Exception as e:
+        _boot_write(f"=== _init_pool IMPORT FAILED (pid={os.getpid()}): {type(e).__name__}: {e} ===")
+        _boot_write(f"  GDAL_DATA={os.environ.get('GDAL_DATA', 'NOT SET')}")
+        _boot_write(f"  PROJ_LIB={os.environ.get('PROJ_LIB', 'NOT SET')}")
+        traceback.print_exc(file=_safe_log_fh())
+        raise
 
-    global _TILING_ROOT, _PREP_WATER_DIR, _INPUT_FILE_MAP, _FAIL_LAZ_ROOT
+    global _TILING_ROOT, _PREP_WATER_DIR, _INPUT_FILE_MAP, _FAIL_LAZ_ROOT, _MASTER_QML_PATH
     _TILING_ROOT = tiling_root
     _PREP_WATER_DIR = prep_water_dir
     _INPUT_FILE_MAP = input_file_map or {}
     _FAIL_LAZ_ROOT = fail_laz_root
+    _MASTER_QML_PATH = master_qml_path
 
     atexit.register(_close_worker_sources)
 
@@ -679,10 +1019,11 @@ def process_raster(raster_path: str, clipped_utm_folder: str, unclipped_utm_fold
     Moves original unclipped raster into:
       - unclipped_utm_folder/FAIL (only if FAIL)
 
-    Returns (Filename, Result, Info) for CSV.
+    Returns (Filename, Result, Info, Time) for log file.
     """
     global _TILE_DICT
 
+    t_start = time.perf_counter()
     filename = os.path.basename(raster_path)
 
     if RioCRS is None or Affine is None or rasterio is None or fiona is None:
@@ -691,31 +1032,37 @@ def process_raster(raster_path: str, clipped_utm_folder: str, unclipped_utm_fold
         except Exception:
             pass
         if RioCRS is None or Affine is None or rasterio is None or fiona is None:
-            return (filename, "ERROR", f"heavy not ready after import: RioCRS={RioCRS} Affine={Affine} rasterio={rasterio} fiona={fiona}")
+            elapsed = time.perf_counter() - t_start
+            return (filename, "ERROR", f"heavy not ready after import: RioCRS={RioCRS} Affine={Affine} rasterio={rasterio} fiona={fiona}", f"{elapsed:.2f}s")
 
     try:
         if os.path.getsize(raster_path) < 1024:
-            return (filename, "SKIP", "File is < 1 KB")
+            elapsed = time.perf_counter() - t_start
+            return (filename, "SKIP", "File is < 1 KB", f"{elapsed:.2f}s")
 
         match = UTM_RE.search(filename)
         if not match:
-            return (filename, "SKIP", "Could not find UTM zone in filename")
+            elapsed = time.perf_counter() - t_start
+            return (filename, "SKIP", "Could not find UTM zone in filename", f"{elapsed:.2f}s")
 
         utm_number = int(match.group(1))
         utm_tag = f"utm{utm_number}"
         if utm_tag not in EPSG_BY_UTM:
-            return (filename, "SKIP", f"Unsupported UTM zone: {utm_number}")
+            elapsed = time.perf_counter() - t_start
+            return (filename, "SKIP", f"Unsupported UTM zone: {utm_number}", f"{elapsed:.2f}s")
 
         # tile name key (expecting something like: <prefix>_<a>_<b>_<c>_<d>_... .tif)
         parts = filename.split("_")
         if len(parts) < 5:
-            return (filename, "SKIP", "Filename does not match expected tile pattern (needs >= 5 underscore parts)")
+            elapsed = time.perf_counter() - t_start
+            return (filename, "SKIP", "Filename does not match expected tile pattern (needs >= 5 underscore parts)", f"{elapsed:.2f}s")
 
         tile_key = "".join(parts[1:5]).lower()
 
         tile_entry = _TILE_DICT.get(tile_key) if _TILE_DICT else None
         if tile_entry is None:
-            return (filename, "SKIP", "No matching tile geometry")
+            elapsed = time.perf_counter() - t_start
+            return (filename, "SKIP", "No matching tile geometry", f"{elapsed:.2f}s")
         
         with rasterio.open(raster_path) as src:
             data = src.read(1)
@@ -741,12 +1088,14 @@ def process_raster(raster_path: str, clipped_utm_folder: str, unclipped_utm_fold
         res_x = src_transform.a
         res_y = -src_transform.e if src_transform.e < 0 else src_transform.e
         if res_x == 0 or res_y == 0:
-            return (filename, "ERROR", "Invalid source resolution")
+            elapsed = time.perf_counter() - t_start
+            return (filename, "ERROR", "Invalid source resolution", f"{elapsed:.2f}s")
 
         out_width = int(np.ceil((maxx - minx) / res_x))
         out_height = int(np.ceil((maxy - miny) / res_y))
         if out_width <= 0 or out_height <= 0:
-            return (filename, "ERROR", "Computed non-positive output dimensions")
+            elapsed = time.perf_counter() - t_start
+            return (filename, "ERROR", "Computed non-positive output dimensions", f"{elapsed:.2f}s")
 
         # Snap to the SAME pixel size as the source raster.
         # Using ceil() means this grid may extend slightly past the tile bounds, which is fine
@@ -813,6 +1162,19 @@ def process_raster(raster_path: str, clipped_utm_folder: str, unclipped_utm_fold
         with rasterio.open(clipped_path, "w", **profile) as dst:
             dst.write(final_data, 1)
 
+        # Link QML sidecar for QGIS auto-styling (red < 8.0, green >= 8.0)
+        # Uses single master QML file via hard link (or copy fallback)
+        try:
+            if _MASTER_QML_PATH and os.path.isfile(_MASTER_QML_PATH):
+                qml_ok, qml_msg = link_qml_to_raster(
+                    tif_path=clipped_path,
+                    master_qml_path=_MASTER_QML_PATH
+                )
+                if not qml_ok:
+                    info = info + f" | {qml_msg}"
+        except Exception as qml_err:
+            info = info + f" | QML_EXCEPTION: {qml_err}"
+
         if result == "FAIL":
             # Move unclipped TIFF into Unclipped/.../FAIL
             fail_dir = os.path.join(unclipped_utm_folder, "FAIL")
@@ -836,13 +1198,14 @@ def process_raster(raster_path: str, clipped_utm_folder: str, unclipped_utm_fold
             except Exception as pc_err:
                 info = info + f" | PC_MOVE_FAILED: {pc_err}"
 
-
-        return (filename, result, info)
+        elapsed = time.perf_counter() - t_start
+        return (filename, result, info, f"{elapsed:.2f}s")
 
     except Exception as e:
+        elapsed = time.perf_counter() - t_start
         _boot_write("=== ERROR in process_raster ===")
         traceback.print_exc(file=_BOOT_FH)  # logs to boot_<pid>.log for that worker
-        return (filename, "ERROR", f"{type(e).__name__}: {e}")
+        return (filename, "ERROR", f"{type(e).__name__}: {e}", f"{elapsed:.2f}s")
 
 # -----------------------------------------------------------------------------
 # Clipping driver per UTM folder
@@ -859,20 +1222,20 @@ def clip_density_grids_parallel(
     if executor is None:
         raise ValueError("clip_density_grids_parallel() requires an executor when using the shared pool.")
 
-    # Always define counts FIRST so early-returns can safely return ([], counts)
+    # Always define counts FIRST so early-returns can safely return ([], counts, [])
     counts = {"PASS": 0, "FAIL": 0, "SKIP": 0, "ERROR": 0}
 
     m = UTM_RE.search(os.path.basename(unclipped_utm_folder))
     if not m:
         print(f"Error: Cannot detect UTM zone from folder: {unclipped_utm_folder}")
-        return [], counts
+        return [], counts, []
 
     zone = int(m.group(1))  # <-- you need this (you use zone below)
 
     raster_files = sorted(glob.glob(os.path.join(unclipped_utm_folder, "*.tif")))
     if not raster_files:
         print(f"No TIFFs found in {unclipped_utm_folder}, skipping.")
-        return [], counts
+        return [], counts, []
 
     os.makedirs(clipped_utm_folder, exist_ok=True)
 
@@ -891,25 +1254,21 @@ def clip_density_grids_parallel(
         chunksize = 4
 
     fail_only = []
-    log_path = os.path.join(clipped_utm_folder, "density_check_log.csv")
+    all_results = []
 
-    with open(log_path, "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(["Filename", "Result", "Info"])
+    for row in executor.map(process_raster_task, tasks, chunksize=chunksize):
+        filename, result, info, elapsed = row
+        counts[result] = counts.get(result, 0) + 1
 
-        for row in executor.map(process_raster_task, tasks, chunksize=chunksize):
-            result = row[1]
-            counts[result] = counts.get(result, 0) + 1
+        all_results.append((zone, filename, result, info, elapsed))
 
-            if result != "PASS":
-                print(",".join(row))
+        if result != "PASS":
+            print(f"{filename} | {result} | {elapsed} | {info}")
 
-            w.writerow(row)
+        if result == "FAIL":
+            fail_only.append((zone, filename, info))
 
-            if result == "FAIL":
-                fail_only.append((zone, row[0], row[2]))
-
-    return fail_only, counts
+    return fail_only, counts, all_results
 
 # -----------------------------------------------------------------------------
 # Run density check (main pipeline)
@@ -966,24 +1325,16 @@ def run_density_check(cfg: dict, input_dir, custom_output_dir=None, workers=DEFA
     lasgrid_out = os.path.join(output_root, "_lasgrid_out")
     os.makedirs(lasgrid_out, exist_ok=True)
 
-    input_files = sorted(
-        glob.glob(os.path.join(input_dir, "*.laz")) +
-        glob.glob(os.path.join(input_dir, "*.las"))
-    )
+    input_files = sorted(glob.glob(os.path.join(input_dir, "*.laz")))
     if not input_files:
-        messagebox.showerror("Error", "No .las or .laz files found in the input directory.")
+        messagebox.showerror("Error", "No .laz files found in the input directory.")
         return
-    
-    # Map: input stem -> full path (prefer .laz over .las if both exist)
+
+    # Map: input stem -> full path
     input_file_map = {}
     for p in input_files:
         stem = Path(p).stem.lower()
-        if stem not in input_file_map:
-            input_file_map[stem] = p
-        else:
-            # prefer .laz
-            if p.lower().endswith(".laz") and not input_file_map[stem].lower().endswith(".laz"):
-                input_file_map[stem] = p
+        input_file_map[stem] = p
 
     # Failed LAZs folder goes next to the input LAZs (but not inside TIFF output)
     fail_laz_root = os.path.join(input_dir, "LAZ_Density_Fail")
@@ -1034,6 +1385,14 @@ def run_density_check(cfg: dict, input_dir, custom_output_dir=None, workers=DEFA
             raise RuntimeError(f"lasgrid produced no .tif files in:\n{lasgrid_out}\nSee:\n{log_path}")
 
 
+        # Clean leftover TIFs from previous runs in Unclipped subdirectories
+        for old_utm_dir in glob.glob(os.path.join(unclipped_root, "UTM*_Unclipped")):
+            for old_tif in glob.glob(os.path.join(old_utm_dir, "*.tif")):
+                try:
+                    os.remove(old_tif)
+                except Exception:
+                    pass
+
         print("Sorting TIFFs into Unclipped/UTMxx_Unclipped...")
         unclipped_utm_folders = sort_tifs_by_utm(lasgrid_out, unclipped_root)
         t3 = time.perf_counter()
@@ -1048,13 +1407,29 @@ def run_density_check(cfg: dict, input_dir, custom_output_dir=None, workers=DEFA
 
         # ---- clipping pool timing ----
         t4 = time.perf_counter()
-        
+
         totals = {"PASS": 0, "FAIL": 0, "SKIP": 0, "ERROR": 0}
+        errors_encountered = []
+
+        # Create ONE master QML file for all rasters (workers will link to it)
+        print("Creating master QML style file...")
+        try:
+            master_qml_path = create_master_qml(
+                output_root=output_root,
+                threshold=8.0,
+                nodata_value=NODATA_VALUE
+            )
+            print(f"Master QML: {master_qml_path}")
+        except Exception as e:
+            error_msg = f"Failed to create master QML: {type(e).__name__}: {e}"
+            errors_encountered.append(error_msg)
+            print(f"ERROR: {error_msg}")
+            master_qml_path = None
 
         with ProcessPoolExecutor(
             max_workers=workers,
             initializer=_init_pool,
-            initargs=(cfg["tiling_scheme_root"], cfg["prep_water_gpkg_dir"], input_file_map, fail_laz_root),
+            initargs=(cfg["tiling_scheme_root"], cfg["prep_water_gpkg_dir"], input_file_map, fail_laz_root, master_qml_path),
         ) as executor:
             t5 = time.perf_counter()
             print(f"[TIMING] pool_startup: {t5 - t4:.2f}s")
@@ -1066,27 +1441,149 @@ def run_density_check(cfg: dict, input_dir, custom_output_dir=None, workers=DEFA
                 zone = int(m.group(1))
                 clipped_utm = os.path.join(clipped_root, utm_folder_name(zone, "Clipped"))
 
-                failed_rows, zone_counts = clip_density_grids_parallel(
-                    cfg, unclipped_utm, clipped_utm,
-                    input_file_map, fail_laz_root,
-                    workers=workers,
-                    executor=executor
-                )
+                try:
+                    failed_rows, zone_counts, zone_results = clip_density_grids_parallel(
+                        cfg, unclipped_utm, clipped_utm,
+                        input_file_map, fail_laz_root,
+                        workers=workers,
+                        executor=executor
+                    )
 
-                # accumulate fails
-                if failed_rows:
-                    all_failed.extend(failed_rows)
+                    # accumulate fails
+                    if failed_rows:
+                        all_failed.extend(failed_rows)
 
-                # accumulate counts (we’ll define totals just before the executor loop)
-                for k, v in zone_counts.items():
-                    totals[k] = totals.get(k, 0) + v
+                    # accumulate counts
+                    for k, v in zone_counts.items():
+                        totals[k] = totals.get(k, 0) + v
+
+                    # Write per-UTM results CSV
+                    if zone_results:
+                        csv_path = os.path.join(clipped_utm, f"density_results_UTM{zone:02d}.csv")
+                        try:
+                            with open(csv_path, "w", newline="", encoding="utf-8") as cf:
+                                cw = csv.writer(cf)
+                                cw.writerow(["UTM_Zone", "Filename", "Result", "Pct_Above_8", "Time"])
+                                for z, fn, res, info, elapsed in zone_results:
+                                    pct = info.split()[0] if info else ""
+                                    cw.writerow([f"UTM{z:02d}", fn, res, pct, elapsed])
+                            print(f"Results CSV: {csv_path}")
+                        except Exception as csv_err:
+                            print(f"Warning: Failed to write results CSV: {csv_err}")
+                except Exception as e:
+                    error_msg = f"UTM{zone:02d} clipping failed: {type(e).__name__}: {e}"
+                    errors_encountered.append(error_msg)
+                    print(f"ERROR: {error_msg}")
 
             t6 = time.perf_counter()
             print(f"[TIMING] clipping_total: {t6 - t5:.2f}s")
 
+        # ---- Link QML to unclipped tiles ----
+        print("Linking QML styles to unclipped tiles...")
+        try:
+            unclipped_success, unclipped_fail = link_qml_to_directory(unclipped_root, master_qml_path)
+            if unclipped_success > 0:
+                print(f"Linked QML to {unclipped_success} unclipped tiles")
+            if unclipped_fail > 0:
+                warn_msg = f"Failed to link QML to {unclipped_fail} unclipped tiles"
+                errors_encountered.append(warn_msg)
+                print(f"Warning: {warn_msg}")
+        except Exception as e:
+            error_msg = f"QML linking failed: {type(e).__name__}: {e}"
+            errors_encountered.append(error_msg)
+            print(f"ERROR: {error_msg}")
+
         t7 = time.perf_counter()
         print(f"[TIMING] total: {t7 - t0:.2f}s")
 
+        # ---- Write pipeline summary log ----
+        log_path = os.path.join(output_root, "density_check_log.txt")
+        from datetime import datetime
+        try:
+            with open(log_path, "w", encoding="utf-8") as log_file:
+                log_file.write("=" * 80 + "\n")
+                log_file.write("DENSITY CHECK PIPELINE LOG\n")
+                log_file.write("=" * 80 + "\n\n")
+
+                log_file.write(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                log_file.write(f"Input Directory: {input_dir}\n")
+                log_file.write(f"Output Directory: {output_root}\n")
+                log_file.write(f"Workers: {workers}\n")
+                log_file.write(f"Input Files: {len(input_files)} .laz files\n\n")
+
+                log_file.write("=" * 80 + "\n")
+                log_file.write("CONFIGURATION\n")
+                log_file.write("=" * 80 + "\n\n")
+                log_file.write(f"Executable: {sys.executable}\n")
+                log_file.write(f"Frozen: {getattr(sys, 'frozen', False)}\n")
+                _gdal = os.environ.get('GDAL_DATA', 'NOT SET')
+                _proj = os.environ.get('PROJ_LIB', 'NOT SET')
+                _projd = os.environ.get('PROJ_DATA', 'NOT SET')
+                log_file.write(f"GDAL_DATA: {_gdal}\n")
+                log_file.write(f"PROJ_LIB: {_proj}\n")
+                log_file.write(f"PROJ_DATA: {_projd}\n")
+                _tiling = cfg.get("tiling_scheme_root", "")
+                _water = cfg.get("prep_water_gpkg_dir", "")
+                log_file.write(f"Tiling Scheme: {_tiling} (exists={Path(_tiling).is_dir() if _tiling else False})\n")
+                log_file.write(f"Water Data: {_water} (exists={Path(_water).is_dir() if _water else False})\n\n")
+
+                log_file.write("=" * 80 + "\n")
+                log_file.write("PIPELINE STAGES\n")
+                log_file.write("=" * 80 + "\n\n")
+
+                log_file.write(f"1. lasgrid (density grid generation):\n")
+                log_file.write(f"   Duration: {t1 - t0:.2f}s\n")
+                log_file.write(f"   Output: {len(tifs_now)} .tif files generated\n\n")
+
+                log_file.write(f"2. Sorting TIFFs by UTM zone:\n")
+                log_file.write(f"   Duration: {t3 - t1:.2f}s\n")
+                log_file.write(f"   UTM folders: {len(unclipped_utm_folders)}\n\n")
+
+                log_file.write(f"3. QML master file creation:\n")
+                log_file.write(f"   Duration: {t5 - t4:.2f}s\n")
+                log_file.write(f"   Master QML: {master_qml_path if master_qml_path else 'FAILED'}\n\n")
+
+                log_file.write(f"4. Water clipping and QA:\n")
+                log_file.write(f"   Duration: {t6 - t5:.2f}s\n")
+                log_file.write(f"   PASS: {totals.get('PASS', 0)}\n")
+                log_file.write(f"   FAIL: {totals.get('FAIL', 0)}\n")
+                log_file.write(f"   SKIP: {totals.get('SKIP', 0)}\n")
+                log_file.write(f"   ERROR: {totals.get('ERROR', 0)}\n\n")
+
+                log_file.write(f"5. QML linking to unclipped tiles:\n")
+                log_file.write(f"   Duration: {t7 - t6:.2f}s\n\n")
+
+                log_file.write("=" * 80 + "\n")
+                log_file.write("SUMMARY\n")
+                log_file.write("=" * 80 + "\n\n")
+
+                log_file.write(f"Total Duration: {t7 - t0:.2f}s\n")
+                log_file.write(f"Total Tiles Processed: {sum(totals.values())}\n")
+                log_file.write(f"Pass Rate: {totals.get('PASS', 0) / max(1, sum(totals.values())) * 100:.1f}%\n\n")
+
+                if errors_encountered:
+                    log_file.write("=" * 80 + "\n")
+                    log_file.write("ERRORS ENCOUNTERED\n")
+                    log_file.write("=" * 80 + "\n\n")
+                    for i, error in enumerate(errors_encountered, 1):
+                        log_file.write(f"{i}. {error}\n")
+                    log_file.write("\n")
+
+                log_file.write("=" * 80 + "\n")
+                log_file.write("OUTPUT LOCATIONS\n")
+                log_file.write("=" * 80 + "\n\n")
+                log_file.write(f"Unclipped rasters: {unclipped_root}\n")
+                log_file.write(f"Water-clipped rasters: {clipped_root}\n")
+                log_file.write(f"Per-UTM results CSVs: {clipped_root}/<UTMxx_Clipped>/density_results_UTMxx.csv\n")
+                if totals.get('FAIL', 0) > 0:
+                    log_file.write(f"Failed tiles (.laz + .tif): {fail_laz_root}\n")
+                    log_file.write(f"Failed tiles CSV: {os.path.join(fail_laz_root, 'failed_tiles.csv')}\n")
+                log_file.write(f"Master QML style: {master_qml_path if master_qml_path else 'N/A'}\n")
+                log_file.write("\n")
+
+            print(f"Pipeline log written to: {log_path}")
+        except Exception as e:
+            print(f"Warning: Failed to write pipeline log: {e}")
 
         # ---- after ALL zones ----
         pass_n = totals.get("PASS", 0)
@@ -1142,7 +1639,7 @@ def launch_gui():
             apply_window_icon(self)
             self.title("Settings")
             self.resizable(False, False)
-            self.configure(bg=BG_BAR)
+            self.configure(bg=BG_MAIN, padx=15, pady=15)
 
             self.cfg = cfg
             self.on_save_callback = on_save_callback
@@ -1152,35 +1649,52 @@ def launch_gui():
             self.tiling_var  = tk.StringVar(value=self.cfg.get("tiling_scheme_root", PACKAGED_TILING_DEFAULT))
             self.water_var   = tk.StringVar(value=self.cfg.get("prep_water_gpkg_dir", PACKAGED_WATER_DEFAULT))
 
-            def lbl(text, r, pady=(10, 4)):
-                tk.Label(self, text=text, bg=BG_BAR).grid(row=r, column=0, sticky="w", padx=10, pady=pady, columnspan=3)
-
-            def entry(var, r):
-                tk.Entry(self, textvariable=var, width=78).grid(row=r, column=0, padx=10, pady=4, columnspan=3)
-
             row = 0
-            lbl("LAStools lasgrid64.exe path:", row); row += 1
-            entry(self.lasgrid_var, row); row += 1
-            tk.Button(self, text="Browse…", command=self.browse_lasgrid).grid(row=row, column=0, padx=10, pady=6, sticky="w")
-            tk.Button(self, text="Reset", command=self.reset_lasgrid).grid(row=row, column=1, padx=10, pady=6, sticky="w")
+
+            # LAStools
+            tk.Label(self, text="LAStools lasgrid64.exe:", bg=BG_MAIN, anchor='w').grid(
+                row=row, column=0, sticky='w', pady=(0, 3))
+            row += 1
+            tk.Entry(self, textvariable=self.lasgrid_var, width=70).grid(
+                row=row, column=0, pady=(0, 3), sticky='ew')
+            row += 1
+            btn_frame = tk.Frame(self, bg=BG_MAIN)
+            btn_frame.grid(row=row, column=0, sticky='ew', pady=(0, 15))
+            tk.Button(btn_frame, text="Browse", command=self.browse_lasgrid, width=10).pack(side='left')
+            tk.Button(btn_frame, text="Reset", command=self.reset_lasgrid, width=10).pack(side='right')
             row += 1
 
-            lbl("Tiling scheme folder (Tiles_by_UTM):", row); row += 1
-            entry(self.tiling_var, row); row += 1
-            tk.Button(self, text="Browse…", command=self.browse_tiling).grid(row=row, column=0, padx=10, pady=6, sticky="w")
-            tk.Button(self, text="Reset", command=self.reset_tiling).grid(row=row, column=1, padx=10, pady=6, sticky="w")
+            # Tiling
+            tk.Label(self, text="Tiling Scheme (Tiles_by_UTM):", bg=BG_MAIN, anchor='w').grid(
+                row=row, column=0, sticky='w', pady=(0, 3))
+            row += 1
+            tk.Entry(self, textvariable=self.tiling_var, width=70).grid(
+                row=row, column=0, pady=(0, 3), sticky='ew')
+            row += 1
+            btn_frame = tk.Frame(self, bg=BG_MAIN)
+            btn_frame.grid(row=row, column=0, sticky='ew', pady=(0, 15))
+            tk.Button(btn_frame, text="Browse", command=self.browse_tiling, width=10).pack(side='left')
+            tk.Button(btn_frame, text="Reset", command=self.reset_tiling, width=10).pack(side='right')
             row += 1
 
-            lbl("Water folder (Water_by_UTM):", row); row += 1
-            entry(self.water_var, row); row += 1
-            tk.Button(self, text="Browse…", command=self.browse_water).grid(row=row, column=0, padx=10, pady=6, sticky="w")
-            tk.Button(self, text="Reset", command=self.reset_water).grid(row=row, column=1, padx=10, pady=6, sticky="w")
+            # Water
+            tk.Label(self, text="Water Folder (Water_by_UTM):", bg=BG_MAIN, anchor='w').grid(
+                row=row, column=0, sticky='w', pady=(0, 3))
+            row += 1
+            tk.Entry(self, textvariable=self.water_var, width=70).grid(
+                row=row, column=0, pady=(0, 3), sticky='ew')
+            row += 1
+            btn_frame = tk.Frame(self, bg=BG_MAIN)
+            btn_frame.grid(row=row, column=0, sticky='ew', pady=(0, 20))
+            tk.Button(btn_frame, text="Browse", command=self.browse_water, width=10).pack(side='left')
+            tk.Button(btn_frame, text="Reset", command=self.reset_water, width=10).pack(side='right')
             row += 1
 
-            btns = tk.Frame(self, bg=BG_BAR)
-            btns.grid(row=row, column=0, padx=10, pady=12, sticky="e", columnspan=3)
-            tk.Button(btns, text="Cancel", command=self.cancel).pack(side="right", padx=(8, 0))
-            tk.Button(btns, text="Save", command=self.save).pack(side="right")
+            # Buttons
+            btn_frame2 = tk.Frame(self, bg=BG_MAIN)
+            btn_frame2.grid(row=row, column=0)
+            tk.Button(btn_frame2, text="Save", command=self.save, width=12, bg='#2E7D32', fg='white').pack(side='left', padx=(0, 5))
+            tk.Button(btn_frame2, text="Cancel", command=self.cancel, width=12).pack(side='left')
 
         def browse_lasgrid(self):
             path = filedialog.askopenfilename(
@@ -1218,13 +1732,13 @@ def launch_gui():
             wat = self.water_var.get().strip()
 
             if not las or not os.path.isfile(las):
-                messagebox.showerror("Invalid", f"lasgrid64.exe not found:\n{las}")
+                messagebox.showerror("Invalid Path", f"lasgrid64.exe not found:\n{las}")
                 return
             if not til or not Path(til).is_dir():
-                messagebox.showerror("Invalid", f"Tiling folder not found:\n{til}")
+                messagebox.showerror("Invalid Path", f"Tiling folder not found:\n{til}")
                 return
             if not wat or not Path(wat).is_dir():
-                messagebox.showerror("Invalid", f"Prepared water folder not found:\n{wat}")
+                messagebox.showerror("Invalid Path", f"Prepared water folder not found:\n{wat}")
                 return
 
             self.cfg["lasgrid_exe"] = las
@@ -1233,8 +1747,9 @@ def launch_gui():
 
             try:
                 save_config(self.cfg)
+                messagebox.showinfo("Success", "Settings saved successfully!")
             except Exception as e:
-                messagebox.showerror("Save failed", str(e))
+                messagebox.showerror("Save Failed", str(e))
                 return
 
             if self.on_save_callback:
@@ -1249,56 +1764,54 @@ def launch_gui():
         def __init__(self, master):
             self.master = master
             self.master.title("Last Return Density Checker")
-            self.master.configure(bg=BG_MAIN)
+            self.master.configure(bg=BG_MAIN, padx=15, pady=15)
 
             self.cfg = load_config()
 
+            # Menu bar
             menubar = tk.Menu(master)
             settings_menu = tk.Menu(menubar, tearoff=0)
-            settings_menu.add_command(label="Settings…", command=self.open_settings)
+            settings_menu.add_command(label="Settings", command=self.open_settings)
             menubar.add_cascade(label="Settings", menu=settings_menu)
             master.config(menu=menubar)
-
-            body = tk.Frame(master, bg=BG_MAIN)
-            body.pack(fill="both", expand=True)
 
             self.input_dir = tk.StringVar()
             self.output_dir = tk.StringVar()
             self.use_custom_output = tk.BooleanVar()
 
-            tk.Label(body, text="Input Directory:", bg=BG_MAIN).pack(pady=(12, 5))
-            tk.Entry(body, textvariable=self.input_dir, width=70).pack(padx=10)
-            tk.Button(body, text="Browse", command=self.browse_input_directory).pack(pady=6)
+            # Input
+            tk.Label(master, text="Input Directory:", bg=BG_MAIN).pack(anchor='w', pady=(0, 3))
 
-            tk.Checkbutton(
-                body,
-                text="Use custom output directory",
-                variable=self.use_custom_output,
-                command=self.toggle_output_dir,
-                bg=BG_MAIN
-            ).pack(pady=6)
+            input_frame = tk.Frame(master, bg=BG_MAIN)
+            input_frame.pack(fill='x', pady=(0, 10))
+            tk.Entry(input_frame, textvariable=self.input_dir, width=55).pack(side='left', fill='x', expand=True)
+            tk.Button(input_frame, text="Browse", command=self.browse_input_directory, width=10).pack(side='left', padx=(5, 0))
 
-            self.output_entry = tk.Entry(body, textvariable=self.output_dir, width=70, state="disabled")
-            self.output_entry.pack(padx=10)
-            self.output_browse_btn = tk.Button(body, text="Browse Output", command=self.browse_output_directory, state="disabled")
-            self.output_browse_btn.pack(pady=6)
+            # Custom output checkbox
+            tk.Checkbutton(master, text="Use custom output directory", variable=self.use_custom_output,
+                          command=self.toggle_output_dir, bg=BG_MAIN).pack(anchor='w', pady=(0, 3))
 
+            # Output
+            output_frame = tk.Frame(master, bg=BG_MAIN)
+            output_frame.pack(fill='x', pady=(0, 15))
+            self.output_entry = tk.Entry(output_frame, textvariable=self.output_dir, width=55, state='disabled')
+            self.output_entry.pack(side='left', fill='x', expand=True)
+            self.output_browse_btn = tk.Button(output_frame, text="Browse", command=self.browse_output_directory,
+                                              width=10, state='disabled')
+            self.output_browse_btn.pack(side='left', padx=(5, 0))
+
+            # Workers
+            workers_frame = tk.Frame(master, bg=BG_MAIN)
+            workers_frame.pack(anchor='w', pady=(0, 15))
+            tk.Label(workers_frame, text="CPU Cores:", bg=BG_MAIN).pack(side='left', padx=(0, 5))
             self.workers = tk.IntVar(value=DEFAULT_WORKERS)
-            tk.Label(body, text=f"Number of cores: 1–{WORKERS_CAP}", bg=BG_MAIN).pack(pady=(12, 5))
-            tk.Spinbox(body, from_=1, to=WORKERS_CAP, textvariable=self.workers, width=6).pack()
+            tk.Spinbox(workers_frame, from_=1, to=WORKERS_CAP, textvariable=self.workers, width=8).pack(side='left', padx=(0, 10))
+            tk.Label(workers_frame, text=f"(1-{WORKERS_CAP})", bg=BG_MAIN, fg='#666').pack(side='left')
 
-            self.run_btn = tk.Button(
-                body,
-                text="Density Check",
-                command=self.start_density_check,
-                bg="green",
-                fg="white",
-                height=2,
-                width=20
-            )
-            self.run_btn.pack(pady=22)
-
-
+            # Run button
+            self.run_btn = tk.Button(master, text="Run Density Check", command=self.start_density_check,
+                                    bg='#2E7D32', fg='white', width=25, height=2)
+            self.run_btn.pack(pady=(5, 0))
 
         def open_settings(self):
             SettingsWindow(self.master, dict(self.cfg), self._on_settings_saved)
@@ -1307,25 +1820,27 @@ def launch_gui():
             self.cfg = new_cfg
 
         def browse_input_directory(self):
-            folder = filedialog.askdirectory()
+            folder = filedialog.askdirectory(title="Select Input Directory with .laz files")
             if folder:
                 self.input_dir.set(folder)
 
         def toggle_output_dir(self):
             if self.use_custom_output.get():
-                self.output_entry.config(state="normal")
-                self.output_browse_btn.config(state="normal")
+                self.output_entry.config(state='normal')
+                self.output_browse_btn.config(state='normal')
             else:
-                self.output_entry.config(state="disabled")
-                self.output_browse_btn.config(state="disabled")
+                self.output_entry.config(state='disabled')
+                self.output_browse_btn.config(state='disabled')
 
         def browse_output_directory(self):
-            folder = filedialog.askdirectory()
+            folder = filedialog.askdirectory(title="Select Output Directory")
             if folder:
                 self.output_dir.set(folder)
 
         def start_density_check(self):
-            self.run_btn.config(state="disabled")
+            self.run_btn.config(state='disabled', text='Processing...')
+            self.master.update()
+
             try:
                 input_path = self.input_dir.get().strip()
                 output_path = self.output_dir.get().strip() if self.use_custom_output.get() else None
@@ -1345,7 +1860,7 @@ def launch_gui():
                     workers=workers
                 )
             finally:
-                self.run_btn.config(state="normal")
+                self.run_btn.config(state='normal', text='Run Density Check')
 
     root = tk.Tk()
     apply_window_icon(root)
@@ -1360,8 +1875,6 @@ if __name__ == "__main__":
         log_path = setup_logging()
         _t("after setup_logging")
         print(f"[LOG] {log_path}")
-
-        # Boot log no longer needed once app_debug.log is live
         try:
             if _BOOT_FH is not None and not getattr(_BOOT_FH, "closed", False):
                 _BOOT_FH.flush()
