@@ -631,7 +631,7 @@ def _generate_qml_content(
 
 def create_master_qml(output_root: str, threshold: float = 8.0, nodata_value: float = -9999.0) -> str:
     """
-    Create ONE master QML file in a _styles subdirectory.
+    Create ONE master QML file in _internal/_styles subdirectory.
 
     The master file is the single source of truth. All per-raster .qml files
     are hard-linked to this master, so editing the master updates all styles.
@@ -639,8 +639,10 @@ def create_master_qml(output_root: str, threshold: float = 8.0, nodata_value: fl
     Returns:
         Path to the master QML file
     """
-    # Store master in a _styles folder to keep it organized
-    styles_dir = Path(output_root) / "_styles"
+    # Store master in _internal/_styles folder (misc files users don't need to see)
+    internal_dir = Path(output_root) / "_internal"
+    internal_dir.mkdir(exist_ok=True)
+    styles_dir = internal_dir / "_styles"
     styles_dir.mkdir(exist_ok=True)
     master_qml_path = styles_dir / "density_raster_style_MASTER.qml"
 
@@ -665,10 +667,10 @@ Master Style File:
   {master_qml_path.name}
 
 How It Works:
-- Each .tif file in Water_Clipped/ AND Unclipped/ has a matching .qml file next to it
+- Each .tif file in PASS/, FAIL/, and Unclipped_Rasters/ has a matching .qml file next to it
 - All those .qml files are HARD LINKS to this master file (not copies)
 - They share the same disk space (~5KB total, not 5KB per raster)
-- Editing the master file updates ALL raster styles automatically (both clipped and unclipped)
+- Editing the master file updates ALL raster styles automatically
 
 Current Style (Graduated Colors):
 RED GRADIENT (< {threshold:.1f} - FAIL):
@@ -778,13 +780,12 @@ def link_qml_to_directory(directory: str, master_qml_path: str) -> tuple:
 # -----------------------------------------------------------------------------
 # Output naming
 # -----------------------------------------------------------------------------
-def utm_folder_name(zone: int, kind: str) -> str:
-    if kind.lower() == "clipped":
-        return f"UTM{zone:02d}_Clipped"
-    return f"UTM{zone:02d}_Unclipped"
+def utm_folder_name(zone: int) -> str:
+    """Return the per-zone subfolder name, e.g. 'UTM07'."""
+    return f"UTM{zone:02d}"
 
 # -----------------------------------------------------------------------------
-# Sorting raw lasgrid TIFFs -> Unclipped/UTMxx_Unclipped
+# Sorting raw lasgrid TIFFs -> Unclipped_Rasters/UTMxx
 # -----------------------------------------------------------------------------
 def sort_tifs_by_utm(lasgrid_out_dir: str, unclipped_root: str):
     tif_files = glob.glob(os.path.join(lasgrid_out_dir, "*.tif"))
@@ -798,7 +799,7 @@ def sort_tifs_by_utm(lasgrid_out_dir: str, unclipped_root: str):
             continue
 
         zone = int(match.group(1))
-        dest_folder = os.path.join(unclipped_root, utm_folder_name(zone, "Unclipped"))
+        dest_folder = os.path.join(unclipped_root, utm_folder_name(zone))
         os.makedirs(dest_folder, exist_ok=True)
         utm_folders_used.add(dest_folder)
 
@@ -817,7 +818,8 @@ _PREP_WATER_DIR = None
 _CURRENT_ZONE = None
 
 _INPUT_FILE_MAP = None  # stem(lower) -> full path to .laz
-_FAIL_LAZ_ROOT = None   # e.g. C:\...\input\LAZ_Density_Fail
+_FAIL_LAZ_ROOT = None   # e.g. C:\...\Density_Results\FAIL
+_UNCLIPPED_ROOT = None  # e.g. C:\...\Density_Results\Unclipped_Rasters
 _MASTER_QML_PATH = None  # Path to the master QML file for linking
 
 
@@ -933,7 +935,7 @@ def _load_tile_dict_for_zone(tiling_root: str, utm_zone: int) -> dict:
 
     return out
 
-def _init_pool(tiling_root: str, prep_water_dir: str, input_file_map: dict, fail_laz_root: str, master_qml_path: str):
+def _init_pool(tiling_root: str, prep_water_dir: str, input_file_map: dict, fail_root: str, unclipped_root: str, master_qml_path: str):
     try:
         _import_heavy()  # each worker loads numpy/fiona/rasterio + assigns module globals
     except Exception as e:
@@ -943,11 +945,12 @@ def _init_pool(tiling_root: str, prep_water_dir: str, input_file_map: dict, fail
         traceback.print_exc(file=_safe_log_fh())
         raise
 
-    global _TILING_ROOT, _PREP_WATER_DIR, _INPUT_FILE_MAP, _FAIL_LAZ_ROOT, _MASTER_QML_PATH
+    global _TILING_ROOT, _PREP_WATER_DIR, _INPUT_FILE_MAP, _FAIL_LAZ_ROOT, _UNCLIPPED_ROOT, _MASTER_QML_PATH
     _TILING_ROOT = tiling_root
     _PREP_WATER_DIR = prep_water_dir
     _INPUT_FILE_MAP = input_file_map or {}
-    _FAIL_LAZ_ROOT = fail_laz_root
+    _FAIL_LAZ_ROOT = fail_root
+    _UNCLIPPED_ROOT = unclipped_root
     _MASTER_QML_PATH = master_qml_path
 
     atexit.register(_close_worker_sources)
@@ -970,9 +973,9 @@ def _ensure_zone_loaded(zone: int):
 def process_raster_task(args):
     if np is None:
         _import_heavy()
-    raster_path, zone, clipped_utm_folder, unclipped_utm_folder = args
+    raster_path, zone, pass_utm_folder, fail_rasters_utm_folder = args
     _ensure_zone_loaded(zone)
-    return process_raster(raster_path, clipped_utm_folder, unclipped_utm_folder)
+    return process_raster(raster_path, pass_utm_folder, fail_rasters_utm_folder)
 
 def _rasterize_water_mask(tile_bounds, out_shape, transform):
     if _WATER_SRC is None:
@@ -999,13 +1002,12 @@ def _rasterize_water_mask(tile_bounds, out_shape, transform):
 # -----------------------------------------------------------------------------
 # Core processing (worker)
 # -----------------------------------------------------------------------------
-def process_raster(raster_path: str, clipped_utm_folder: str, unclipped_utm_folder: str):
+def process_raster(raster_path: str, pass_utm_folder: str, fail_rasters_utm_folder: str):
     """
     Writes clipped raster into:
-      - clipped_utm_folder (PASS)
-      - clipped_utm_folder/FAIL (FAIL)
-    Moves original unclipped raster into:
-      - unclipped_utm_folder/FAIL (only if FAIL)
+      - pass_utm_folder         (if PASS)
+      - fail_rasters_utm_folder (if FAIL)
+    Unclipped rasters remain in place (not moved on failure).
 
     Returns (Filename, Result, Info, Time) for log file.
     """
@@ -1112,8 +1114,8 @@ def process_raster(raster_path: str, clipped_utm_folder: str, unclipped_utm_fold
         result = "PASS" if pct_above >= PASS_PERCENT else "FAIL"
         info = f"{pct_above:.2f} >={DENSITY_THRESHOLD}"
 
-        # Output folder selection (create FAIL folder only if needed)
-        clipped_out_dir = clipped_utm_folder if result == "PASS" else os.path.join(clipped_utm_folder, "FAIL")
+        # Output folder selection
+        clipped_out_dir = pass_utm_folder if result == "PASS" else fail_rasters_utm_folder
         os.makedirs(clipped_out_dir, exist_ok=True)
         clipped_path = os.path.join(clipped_out_dir, filename)
 
@@ -1147,27 +1149,29 @@ def process_raster(raster_path: str, clipped_utm_folder: str, unclipped_utm_fold
             info = info + f" | QML_EXCEPTION: {qml_err}"
 
         if result == "FAIL":
-            # Move unclipped TIFF into Unclipped/.../FAIL
-            fail_dir = os.path.join(unclipped_utm_folder, "FAIL")
-            os.makedirs(fail_dir, exist_ok=True)
-            dest = unique_dest_path(os.path.join(fail_dir, filename))
-            try:
-                shutil.move(raster_path, dest)
-            except Exception as move_err:
-                info = info + f" | TIFF_MOVE_FAILED: {move_err}"
-
-            # Move source LAZ/LAS into INPUT_DIR\LAZ_Density_Fail\UTMxx\
+            # Move source LAZ/LAS into FAIL/LAZ_Failed_UTMxx/
             try:
                 src_pc = _match_input_pointcloud_for_tif(filename)
                 if src_pc and os.path.isfile(src_pc) and _FAIL_LAZ_ROOT:
-                    utm_subdir = os.path.join(_FAIL_LAZ_ROOT, f"UTM{_CURRENT_ZONE:02d}_LAZ")
-                    os.makedirs(utm_subdir, exist_ok=True)  # creates LAZ_Density_Fail only if a FAIL happens
+                    utm_subdir = os.path.join(_FAIL_LAZ_ROOT, f"LAZ_Failed_UTM{_CURRENT_ZONE:02d}")
+                    os.makedirs(utm_subdir, exist_ok=True)
                     pc_dest = unique_dest_path(os.path.join(utm_subdir, os.path.basename(src_pc)))
                     shutil.move(src_pc, pc_dest)
                 else:
                     info = info + " | PC_NOT_FOUND"
             except Exception as pc_err:
                 info = info + f" | PC_MOVE_FAILED: {pc_err}"
+
+        # Move unclipped raster to Unclipped_Pass_UTMxx/ or Unclipped_Fail_UTMxx/
+        if _UNCLIPPED_ROOT and os.path.isfile(raster_path):
+            try:
+                status_tag = "Pass" if result == "PASS" else "Fail"
+                unc_dest_dir = os.path.join(_UNCLIPPED_ROOT, f"Unclipped_{status_tag}_UTM{_CURRENT_ZONE:02d}")
+                os.makedirs(unc_dest_dir, exist_ok=True)
+                unc_dest = unique_dest_path(os.path.join(unc_dest_dir, filename))
+                shutil.move(raster_path, unc_dest)
+            except Exception as unc_err:
+                info = info + f" | UNC_MOVE_FAILED: {unc_err}"
 
         elapsed = time.perf_counter() - t_start
         return (filename, result, info, f"{elapsed:.2f}s")
@@ -1184,7 +1188,8 @@ def process_raster(raster_path: str, clipped_utm_folder: str, unclipped_utm_fold
 def clip_density_grids_parallel(
     cfg: dict,
     unclipped_utm_folder: str,
-    clipped_utm_folder: str,
+    pass_utm_folder: str,
+    fail_rasters_utm_folder: str,
     input_file_map: dict,
     fail_laz_root: str,
     workers=DEFAULT_WORKERS,
@@ -1201,20 +1206,21 @@ def clip_density_grids_parallel(
         print(f"Error: Cannot detect UTM zone from folder: {unclipped_utm_folder}")
         return [], counts, []
 
-    zone = int(m.group(1))  # <-- you need this (you use zone below)
+    zone = int(m.group(1))
 
     raster_files = sorted(glob.glob(os.path.join(unclipped_utm_folder, "*.tif")))
     if not raster_files:
         print(f"No TIFFs found in {unclipped_utm_folder}, skipping.")
         return [], counts, []
 
-    os.makedirs(clipped_utm_folder, exist_ok=True)
+    os.makedirs(pass_utm_folder, exist_ok=True)
+    os.makedirs(fail_rasters_utm_folder, exist_ok=True)
 
     requested_workers = clamp_workers(workers)
 
     print(f"[UTM{zone:02d}] Clipping {len(raster_files)} rasters (pool={requested_workers}, needed={min(requested_workers, len(raster_files))})")
 
-    tasks = [(p, zone, clipped_utm_folder, unclipped_utm_folder) for p in raster_files]
+    tasks = [(p, zone, pass_utm_folder, fail_rasters_utm_folder) for p in raster_files]
 
     if len(tasks) >= 256:
         chunksize = 16
@@ -1283,16 +1289,20 @@ def run_density_check(cfg: dict, input_dir, custom_output_dir=None, workers=DEFA
     t0 = time.perf_counter()
 
     base_out = custom_output_dir if custom_output_dir else input_dir
-    output_root = os.path.join(base_out, "Last_Return_Density_Rasters")
+    output_root = os.path.join(base_out, "Density_Results")
     os.makedirs(output_root, exist_ok=True)
 
-    unclipped_root = os.path.join(output_root, "Unclipped")
-    clipped_root   = os.path.join(output_root, "Water_Clipped")
+    unclipped_root = os.path.join(output_root, "Unclipped_Rasters")
+    pass_root = os.path.join(output_root, "PASS")
+    fail_root = os.path.join(output_root, "FAIL")
+    # Zone-specific folders created on-demand: Raster_Failed_UTMxx, LAZ_Failed_UTMxx
     os.makedirs(unclipped_root, exist_ok=True)
-    os.makedirs(clipped_root, exist_ok=True)
+    os.makedirs(pass_root, exist_ok=True)
+    # fail_root subdirs created on-demand by workers
 
-    # lasgrid writes here, then we sort into Unclipped/UTMxx_Unclipped
-    lasgrid_out = os.path.join(output_root, "_lasgrid_out")
+    # Misc files go into _internal (users don't need to see these)
+    internal_root = os.path.join(output_root, "_internal")
+    lasgrid_out = os.path.join(internal_root, "_lasgrid_out")
     os.makedirs(lasgrid_out, exist_ok=True)
 
     input_files = sorted(glob.glob(os.path.join(input_dir, "*.laz")))
@@ -1306,11 +1316,10 @@ def run_density_check(cfg: dict, input_dir, custom_output_dir=None, workers=DEFA
         stem = Path(p).stem.lower()
         input_file_map[stem] = p
 
-    # Failed LAZs folder goes next to the input LAZs (but not inside TIFF output)
-    fail_laz_root = os.path.join(input_dir, "LAZ_Density_Fail")
-
     # We'll accumulate all FAIL rows across all zones here
     all_failed = []
+    # Accumulate ALL results across zones for combined CSV
+    all_zone_results = []
 
 
     try:
@@ -1357,14 +1366,15 @@ def run_density_check(cfg: dict, input_dir, custom_output_dir=None, workers=DEFA
 
         # Record old TIFs BEFORE sorting, so we can safely clean them up AFTER
         old_tifs = set()
-        for old_utm_dir in glob.glob(os.path.join(unclipped_root, "UTM*_Unclipped")):
+        for old_utm_dir in glob.glob(os.path.join(unclipped_root, "*UTM*")):
             for old_tif in glob.glob(os.path.join(old_utm_dir, "*.tif")):
                 old_tifs.add(old_tif)
 
-        print("Sorting TIFFs into Unclipped/UTMxx_Unclipped...")
+        # Sort into temp UTMxx folders first (workers will move to Pass/Fail folders)
+        print("Sorting TIFFs into temp folders for processing...")
         unclipped_utm_folders = sort_tifs_by_utm(lasgrid_out, unclipped_root)
 
-        # Clean only the old TIFs (new ones are safely in place)
+        # Clean only the old TIFs from previous runs (new ones are safely in place)
         for old_tif in old_tifs:
             try:
                 os.remove(old_tif)
@@ -1401,10 +1411,13 @@ def run_density_check(cfg: dict, input_dir, custom_output_dir=None, workers=DEFA
             print(f"ERROR: {error_msg}")
             master_qml_path = None
 
+        # Determine if single zone (no subfolders needed for PASS)
+        single_zone = len(unclipped_utm_folders) == 1
+
         with ProcessPoolExecutor(
             max_workers=workers,
             initializer=_init_pool,
-            initargs=(cfg["tiling_scheme_root"], cfg["prep_water_gpkg_dir"], input_file_map, fail_laz_root, master_qml_path),
+            initargs=(cfg["tiling_scheme_root"], cfg["prep_water_gpkg_dir"], input_file_map, fail_root, unclipped_root, master_qml_path),
         ) as executor:
             t5 = time.perf_counter()
             print(f"[TIMING] pool_startup: {t5 - t4:.2f}s")
@@ -1414,12 +1427,15 @@ def run_density_check(cfg: dict, input_dir, custom_output_dir=None, workers=DEFA
                 if not m:
                     continue
                 zone = int(m.group(1))
-                clipped_utm = os.path.join(clipped_root, utm_folder_name(zone, "Clipped"))
+                # PASS: files directly in PASS/ if single zone, else PASS_UTMxx/
+                pass_utm = pass_root if single_zone else os.path.join(pass_root, f"PASS_UTM{zone:02d}")
+                # FAIL: Raster_Failed_UTMxx/ directly in FAIL/
+                fail_rasters_utm = os.path.join(fail_root, f"Raster_Failed_UTM{zone:02d}")
 
                 try:
                     failed_rows, zone_counts, zone_results = clip_density_grids_parallel(
-                        cfg, unclipped_utm, clipped_utm,
-                        input_file_map, fail_laz_root,
+                        cfg, unclipped_utm, pass_utm, fail_rasters_utm,
+                        input_file_map, fail_root,
                         workers=workers,
                         executor=executor
                     )
@@ -1428,23 +1444,14 @@ def run_density_check(cfg: dict, input_dir, custom_output_dir=None, workers=DEFA
                     if failed_rows:
                         all_failed.extend(failed_rows)
 
+                    # accumulate ALL results for combined CSV
+                    if zone_results:
+                        all_zone_results.extend(zone_results)
+
                     # accumulate counts
                     for k, v in zone_counts.items():
                         totals[k] = totals.get(k, 0) + v
 
-                    # Write per-UTM results CSV
-                    if zone_results:
-                        csv_path = os.path.join(clipped_utm, f"density_results_UTM{zone:02d}.csv")
-                        try:
-                            with open(csv_path, "w", newline="", encoding="utf-8") as cf:
-                                cw = csv.writer(cf)
-                                cw.writerow(["UTM_Zone", "Filename", "Result", "Pct_Above_8", "Time"])
-                                for z, fn, res, info, elapsed in zone_results:
-                                    pct = info.split()[0] if info else ""
-                                    cw.writerow([f"UTM{z:02d}", fn, res, pct, elapsed])
-                            print(f"Results CSV: {csv_path}")
-                        except Exception as csv_err:
-                            print(f"Warning: Failed to write results CSV: {csv_err}")
                 except Exception as e:
                     error_msg = f"UTM{zone:02d} clipping failed: {type(e).__name__}: {e}"
                     errors_encountered.append(error_msg)
@@ -1453,15 +1460,41 @@ def run_density_check(cfg: dict, input_dir, custom_output_dir=None, workers=DEFA
             t6 = time.perf_counter()
             print(f"[TIMING] clipping_total: {t6 - t5:.2f}s")
 
-        # ---- Link QML to unclipped tiles ----
-        if master_qml_path:
-            print("Linking QML styles to unclipped tiles...")
+        # Clean up empty temp UTMxx folders (files were moved to Pass/Fail folders)
+        for temp_utm_dir in unclipped_utm_folders:
             try:
-                unclipped_success, unclipped_fail = link_qml_to_directory(unclipped_root, master_qml_path)
-                if unclipped_success > 0:
-                    print(f"Linked QML to {unclipped_success} unclipped tiles")
-                if unclipped_fail > 0:
-                    warn_msg = f"Failed to link QML to {unclipped_fail} unclipped tiles"
+                if os.path.isdir(temp_utm_dir) and not os.listdir(temp_utm_dir):
+                    os.rmdir(temp_utm_dir)
+            except Exception:
+                pass
+
+        # ---- Write combined density_results.csv ----
+        if all_zone_results:
+            combined_csv_path = os.path.join(output_root, "density_results.csv")
+            try:
+                with open(combined_csv_path, "w", newline="", encoding="utf-8") as cf:
+                    cw = csv.writer(cf)
+                    cw.writerow(["UTM_Zone", "Filename", "Result", "Pct_Above_8", "Time"])
+                    for z, fn, res, info, elapsed in all_zone_results:
+                        pct = info.split()[0] if info else ""
+                        cw.writerow([f"UTM{z:02d}", fn, res, pct, elapsed])
+                print(f"Combined results CSV: {combined_csv_path}")
+            except Exception as csv_err:
+                print(f"Warning: Failed to write combined results CSV: {csv_err}")
+
+        # ---- Link QML to all output directories ----
+        if master_qml_path:
+            print("Linking QML styles to output rasters...")
+            try:
+                unc_ok, unc_fail = link_qml_to_directory(unclipped_root, master_qml_path)
+                pass_ok, pass_fail_qml = link_qml_to_directory(pass_root, master_qml_path)
+                fail_ok, fail_fail_qml = link_qml_to_directory(fail_root, master_qml_path)
+                total_ok = unc_ok + pass_ok + fail_ok
+                total_fail_qml = unc_fail + pass_fail_qml + fail_fail_qml
+                if total_ok > 0:
+                    print(f"Linked QML to {total_ok} rasters (unclipped={unc_ok}, pass={pass_ok}, fail={fail_ok})")
+                if total_fail_qml > 0:
+                    warn_msg = f"Failed to link QML to {total_fail_qml} rasters"
                     errors_encountered.append(warn_msg)
                     print(f"Warning: {warn_msg}")
             except Exception as e:
@@ -1548,11 +1581,13 @@ def run_density_check(cfg: dict, input_dir, custom_output_dir=None, workers=DEFA
                 log_file.write("OUTPUT LOCATIONS\n")
                 log_file.write("=" * 80 + "\n\n")
                 log_file.write(f"Unclipped rasters: {unclipped_root}\n")
-                log_file.write(f"Water-clipped rasters: {clipped_root}\n")
-                log_file.write(f"Per-UTM results CSVs: {clipped_root}/<UTMxx_Clipped>/density_results_UTMxx.csv\n")
+                log_file.write(f"  (Unclipped_Pass_UTMxx/ and Unclipped_Fail_UTMxx/ subfolders)\n")
+                log_file.write(f"Clipped passing rasters: {pass_root}\n")
+                log_file.write(f"Combined results CSV: {os.path.join(output_root, 'density_results.csv')}\n")
                 if totals.get('FAIL', 0) > 0:
-                    log_file.write(f"Failed tiles (.laz + .tif): {fail_laz_root}\n")
-                    log_file.write(f"Failed tiles CSV: {os.path.join(fail_laz_root, 'failed_tiles.csv')}\n")
+                    log_file.write(f"Failed folder: {fail_root}\n")
+                    log_file.write(f"  (Raster_Failed_UTMxx/ and LAZ_Failed_UTMxx/ subfolders)\n")
+                    log_file.write(f"Failed tiles CSV: {os.path.join(fail_root, 'failed_tiles.csv')}\n")
                 log_file.write(f"Master QML style: {master_qml_path if master_qml_path else 'N/A'}\n")
                 log_file.write("\n")
 
@@ -1568,8 +1603,8 @@ def run_density_check(cfg: dict, input_dir, custom_output_dir=None, workers=DEFA
 
         # Write failed_tiles.csv if there were FAIL tiles
         if fail_n > 0:
-            os.makedirs(fail_laz_root, exist_ok=True)
-            failed_csv = os.path.join(fail_laz_root, "failed_tiles.csv")
+            os.makedirs(fail_root, exist_ok=True)
+            failed_csv = os.path.join(fail_root, "failed_tiles.csv")
             with open(failed_csv, "w", newline="", encoding="utf-8") as f:
                 w = csv.writer(f)
                 w.writerow(["UTM_Zone", "TIFF_Filename", "Info"])
