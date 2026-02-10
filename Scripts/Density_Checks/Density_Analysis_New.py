@@ -438,7 +438,7 @@ BG_MAIN = "#f0f0f0"
 # -----------------------------------------------------------------------------
 # Constants
 # -----------------------------------------------------------------------------
-APP_VERSION = "1.3.3"
+APP_VERSION = "1.3.4"
 
 WATER_GPKG_TEMPLATE = "Water_UTM{zone:02d}_buf50m_tilebbox.gpkg"
 WATER_LAYER_TEMPLATE = "water_utm{zone:02d}_buf50m"
@@ -464,24 +464,37 @@ EPSG_BY_UTM = {
 
 # Hardcoded WKT for BC UTM zones (NAD83(CSRS)).
 # Avoids CRS.from_epsg() which requires a matching proj.db version.
-_UTM_CENTRAL_MERIDIAN = {7: -141, 8: -135, 9: -129, 10: -123, 11: -117}
+# AUTHORITY tags are required so QGIS can identify the CRS automatically.
+_UTM_ZONE_INFO = {
+    7:  (-141, 3154),
+    8:  (-135, 3155),
+    9:  (-129, 3156),
+    10: (-123, 3157),
+    11: (-117, 2955),
+}
 
 def _wkt_for_utm(zone: int) -> str:
-    cm = _UTM_CENTRAL_MERIDIAN[zone]
+    cm, epsg = _UTM_ZONE_INFO[zone]
     return (
         f'PROJCS["NAD83(CSRS) / UTM zone {zone}N",'
         'GEOGCS["NAD83(CSRS)",'
         'DATUM["NAD83_Canadian_Spatial_Reference_System",'
-        'SPHEROID["GRS 1980",6378137,298.257222101]],'
-        'PRIMEM["Greenwich",0],'
-        'UNIT["degree",0.0174532925199433]],'
+        'SPHEROID["GRS 1980",6378137,298.257222101,'
+        'AUTHORITY["EPSG","7019"]]],'
+        'PRIMEM["Greenwich",0,'
+        'AUTHORITY["EPSG","8901"]],'
+        'UNIT["degree",0.0174532925199433,'
+        'AUTHORITY["EPSG","9122"]],'
+        'AUTHORITY["EPSG","4617"]],'
         'PROJECTION["Transverse_Mercator"],'
         'PARAMETER["latitude_of_origin",0],'
         f'PARAMETER["central_meridian",{cm}],'
         'PARAMETER["scale_factor",0.9996],'
         'PARAMETER["false_easting",500000],'
         'PARAMETER["false_northing",0],'
-        'UNIT["metre",1]]'
+        'UNIT["metre",1,'
+        'AUTHORITY["EPSG","9001"]],'
+        f'AUTHORITY["EPSG","{epsg}"]]'
     )
 
 # -----------------------------------------------------------------------------
@@ -1107,12 +1120,13 @@ def process_raster(raster_path: str, pass_utm_folder: str, fail_rasters_utm_fold
         # clamp negatives to 0 in-place (no extra array)
         np.maximum(data, 0, out=data)
 
-        if src_crs is None:
-            utm_number_for_crs = int(UTM_RE.search(utm_tag).group(1))
-            try:
-                src_crs = RioCRS.from_epsg(EPSG_BY_UTM[utm_tag])
-            except Exception:
-                src_crs = RioCRS.from_wkt(_wkt_for_utm(utm_number_for_crs))
+        # Always assign the known horizontal-only CRS for this UTM zone.
+        # Lasgrid sometimes embeds a compound CRS (horizontal + vertical datum)
+        # which QGIS can't transform. Density rasters don't need a vertical datum.
+        try:
+            src_crs = RioCRS.from_epsg(EPSG_BY_UTM[utm_tag])
+        except Exception:
+            src_crs = RioCRS.from_wkt(_wkt_for_utm(utm_number))
 
         tile_geom, (minx, miny, maxx, maxy) = tile_entry
         res_x = src_transform.a
