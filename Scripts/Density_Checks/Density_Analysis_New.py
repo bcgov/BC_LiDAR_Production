@@ -336,6 +336,29 @@ if getattr(sys, "frozen", False):
         os.environ["PROJ_LIB"] = str(_bundled_proj)
         os.environ["PROJ_DATA"] = str(_bundled_proj)
 
+    # Prevent conflicting PROJ/GDAL DLLs from OSGeo4W, QGIS, or other GIS
+    # installations on the system PATH from being loaded instead of the
+    # bundled ones. Put the exe directory first and filter out known conflicts.
+    _exe_dir = str(Path(sys.executable).resolve().parent)
+    _conflict_names = {"osgeo4w", "qgis", "grass", "proj", "gdal", "saga"}
+    _clean_path = [_exe_dir]
+    for _p in os.environ.get("PATH", "").split(os.pathsep):
+        if not _p:
+            continue
+        if any(name in _p.lower() for name in _conflict_names):
+            _boot_write(f"PATH_STRIPPED: {_p}")
+            continue
+        if os.path.normcase(_p) != os.path.normcase(_exe_dir):
+            _clean_path.append(_p)
+    os.environ["PATH"] = os.pathsep.join(_clean_path)
+
+    # Python 3.8+: explicitly add exe directory as DLL search path
+    if hasattr(os, "add_dll_directory"):
+        try:
+            os.add_dll_directory(_exe_dir)
+        except OSError:
+            pass
+
 env_prefix = Path(sys.prefix)
 exe = Path(sys.executable)
 conda_root = exe.parents[2] if len(exe.parents) >= 3 else env_prefix
@@ -411,6 +434,8 @@ BG_MAIN = "#f0f0f0"
 # -----------------------------------------------------------------------------
 # Constants
 # -----------------------------------------------------------------------------
+APP_VERSION = "1.3.2"
+
 WATER_GPKG_TEMPLATE = "Water_UTM{zone:02d}_buf50m_tilebbox.gpkg"
 WATER_LAYER_TEMPLATE = "water_utm{zone:02d}_buf50m"
 NODATA_VALUE = -9999
@@ -1078,7 +1103,7 @@ def process_raster(raster_path: str, pass_utm_folder: str, fail_rasters_utm_fold
         tile_transform = Affine(res_x, 0, minx, 0, -res_y, maxy)
 
 
-        full_tile_data = np.zeros((out_height, out_width), dtype=np.int32)
+        full_tile_data = np.full((out_height, out_width), NODATA_VALUE, dtype=np.float32)
         reproject(
             source=data,
             destination=full_tile_data,
@@ -1087,7 +1112,7 @@ def process_raster(raster_path: str, pass_utm_folder: str, fail_rasters_utm_fold
             dst_transform=tile_transform,
             dst_crs=src_crs,
             resampling=Resampling.nearest,
-            dst_nodata=0
+            dst_nodata=NODATA_VALUE
         )
 
 
@@ -1124,7 +1149,7 @@ def process_raster(raster_path: str, pass_utm_folder: str, fail_rasters_utm_fold
             "height": out_height,
             "width": out_width,
             "count": 1,
-            "dtype": "int32",
+            "dtype": "float32",
             "crs": src_crs,
             "transform": tile_transform,
             "nodata": NODATA_VALUE,
@@ -1818,10 +1843,14 @@ def launch_gui():
             tk.Spinbox(workers_frame, from_=1, to=WORKERS_CAP, textvariable=self.workers, width=8).pack(side='left', padx=(0, 10))
             tk.Label(workers_frame, text=f"(1-{WORKERS_CAP})", bg=BG_MAIN, fg='#666').pack(side='left')
 
-            # Run button
-            self.run_btn = tk.Button(master, text="Run Density Check", command=self.start_density_check,
+            # Run button + version label on same row
+            run_frame = tk.Frame(master, bg=BG_MAIN)
+            run_frame.pack(fill='x', pady=(5, 0))
+            self.run_btn = tk.Button(run_frame, text="Run Density Check", command=self.start_density_check,
                                     bg='#2E7D32', fg='white', width=25, height=2)
-            self.run_btn.pack(pady=(5, 0))
+            self.run_btn.pack(side='left', expand=True)
+            tk.Label(run_frame, text=f"v{APP_VERSION}", bg=BG_MAIN, fg='#999',
+                     font=("Segoe UI", 7)).pack(side='right', anchor='s')
 
         def open_settings(self):
             SettingsWindow(self.master, dict(self.cfg), self._on_settings_saved)
