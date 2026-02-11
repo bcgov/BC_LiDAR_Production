@@ -438,7 +438,7 @@ BG_MAIN = "#f0f0f0"
 # -----------------------------------------------------------------------------
 # Constants
 # -----------------------------------------------------------------------------
-APP_VERSION = "1.3.4"
+APP_VERSION = "1.4.0"
 
 WATER_GPKG_TEMPLATE = "Water_UTM{zone:02d}_buf50m_tilebbox.gpkg"
 WATER_LAYER_TEMPLATE = "water_utm{zone:02d}_buf50m"
@@ -1185,10 +1185,18 @@ def process_raster(raster_path: str, pass_utm_folder: str, fail_rasters_utm_fold
 
         total_valid = np.count_nonzero(final_data != NODATA_VALUE)
         count_above = np.count_nonzero(final_data >= DENSITY_THRESHOLD)
-        pct_above = (count_above / total_valid) * 100 if total_valid > 0 else 0.0
 
-        result = "PASS" if pct_above >= PASS_PERCENT else "FAIL"
-        info = f"{pct_above:.2f} >={DENSITY_THRESHOLD}"
+        if total_valid == 0:
+            # Entire tile is water/NODATA — nothing to evaluate, auto-pass
+            pct_above = 0.0
+            result = "PASS"
+            info = f"0.00 >={DENSITY_THRESHOLD}"
+            note = "All water/nodata - auto-pass"
+        else:
+            pct_above = (count_above / total_valid) * 100
+            result = "PASS" if pct_above >= PASS_PERCENT else "FAIL"
+            info = f"{pct_above:.2f} >={DENSITY_THRESHOLD}"
+            note = ""
 
         # Output folder selection
         clipped_out_dir = pass_utm_folder if result == "PASS" else fail_rasters_utm_folder
@@ -1250,13 +1258,13 @@ def process_raster(raster_path: str, pass_utm_folder: str, fail_rasters_utm_fold
                 info = info + f" | UNC_MOVE_FAILED: {unc_err}"
 
         elapsed = time.perf_counter() - t_start
-        return (filename, result, info, f"{elapsed:.2f}s")
+        return (filename, result, info, f"{elapsed:.2f}s", note)
 
     except Exception as e:
         elapsed = time.perf_counter() - t_start
         _boot_write("=== ERROR in process_raster ===")
         traceback.print_exc(file=_BOOT_FH)  # logs to boot_<pid>.log for that worker
-        return (filename, "ERROR", f"{type(e).__name__}: {e}", f"{elapsed:.2f}s")
+        return (filename, "ERROR", f"{type(e).__name__}: {e}", f"{elapsed:.2f}s", "")
 
 # -----------------------------------------------------------------------------
 # Clipping driver per UTM folder
@@ -1290,7 +1298,6 @@ def clip_density_grids_parallel(
         return [], counts, []
 
     os.makedirs(pass_utm_folder, exist_ok=True)
-    os.makedirs(fail_rasters_utm_folder, exist_ok=True)
 
     requested_workers = clamp_workers(workers)
 
@@ -1309,16 +1316,17 @@ def clip_density_grids_parallel(
     all_results = []
 
     for row in executor.map(process_raster_task, tasks, chunksize=chunksize):
-        filename, result, info, elapsed = row
+        filename, result, info, elapsed, note = row
         counts[result] = counts.get(result, 0) + 1
 
-        all_results.append((zone, filename, result, info, elapsed))
+        all_results.append((zone, filename, result, info, elapsed, note))
 
         if result != "PASS":
             print(f"{filename} | {result} | {elapsed} | {info}")
 
         if result == "FAIL":
-            fail_only.append((zone, filename, info))
+            pct = info.split()[0] if info else ""
+            fail_only.append((f"UTM{zone:02d}", filename, result, pct, elapsed, note))
 
     return fail_only, counts, all_results
 
@@ -1550,10 +1558,10 @@ def run_density_check(cfg: dict, input_dir, custom_output_dir=None, workers=DEFA
             try:
                 with open(combined_csv_path, "w", newline="", encoding="utf-8") as cf:
                     cw = csv.writer(cf)
-                    cw.writerow(["UTM_Zone", "Filename", "Result", "Pct_Above_8", "Time"])
-                    for z, fn, res, info, elapsed in all_zone_results:
+                    cw.writerow(["UTM_Zone", "Filename", "Result", "Pct_Above_8", "Time", "Notes"])
+                    for z, fn, res, info, elapsed, note in all_zone_results:
                         pct = info.split()[0] if info else ""
-                        cw.writerow([f"UTM{z:02d}", fn, res, pct, elapsed])
+                        cw.writerow([f"UTM{z:02d}", fn, res, pct, elapsed, note])
                 print(f"Combined results CSV: {combined_csv_path}")
             except Exception as csv_err:
                 print(f"Warning: Failed to write combined results CSV: {csv_err}")
@@ -1715,7 +1723,7 @@ def run_density_check(cfg: dict, input_dir, custom_output_dir=None, workers=DEFA
             failed_csv = os.path.join(fail_root, "failed_tiles.csv")
             with open(failed_csv, "w", newline="", encoding="utf-8") as f:
                 w = csv.writer(f)
-                w.writerow(["UTM_Zone", "TIFF_Filename", "Info"])
+                w.writerow(["UTM_Zone", "Filename", "Result", "Pct_Above_8", "Time", "Notes"])
                 w.writerows(all_failed)
 
         # Build a cleaner summary: only show non-zero categories (always show PASS)
