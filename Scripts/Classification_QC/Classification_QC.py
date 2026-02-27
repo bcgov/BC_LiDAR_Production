@@ -38,39 +38,6 @@ import re
 VERSION = "2.7"
 
 # ------------------------------------------------------------------
-# v2.7 Changes
-# ------------------------------------------------------------------
-# GUI REDESIGN
-#   - Replaced plain tkinter layout with ttkbootstrap (cosmo theme)
-#   - Two-column layout: Main QC rasters (left) vs Optional QC (right)
-#   - Round-toggle checkboxes, LabelFrames, primary/secondary bootstyle
-#   - Bottom row: centered Start Processing button with version label
-#   - Window auto-sizes to content height; fixed width 710px
-#   - New QC_icon.ico applied to main window and all popups
-#
-# CRS — REMOVED GDAL/PROJ DATABASE DEPENDENCY
-#   - Merged GeoTIFFs previously relied on rasterio CRS lookups at
-#     runtime, requiring the PROJ database to be present and correctly
-#     pointed to by env vars. This caused silent wrong-CRS output when
-#     the database was missing or misconfigured in the frozen exe.
-#   - All five BC UTM zone CRS definitions are now hardcoded as WKT
-#     strings in _UTM_WKT (EPSG 3154–3157 and 2955).  No PROJ lookup
-#     is performed; the correct zone is resolved purely from the UTM
-#     number embedded in the source filename (e.g. "utm10").
-#   - If the filename contains no recognisable UTM zone, a clear
-#     ValueError is raised with actionable instructions instead of
-#     silently applying a wrong CRS.
-#
-# ROBUSTNESS FIXES
-#   - Entire processing pipeline wrapped in try/except; errors surface
-#     as a messagebox instead of crashing silently.
-#   - All os.system() calls now check the return code and raise
-#     RuntimeError if lasgrid64 / blast2dem64 exits non-zero.
-#   - Directory chooser rejects folders with no .las files and clears
-#     the path so processing cannot start on an invalid directory.
-# ------------------------------------------------------------------
-
-# ------------------------------------------------------------------
 # Hardcoded WKT for BC UTM zones — no PROJ database lookup needed.
 # Update central_meridian / AUTHORITY if adding new zones.
 # ------------------------------------------------------------------
