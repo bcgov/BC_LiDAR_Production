@@ -32,6 +32,11 @@ from shapely.geometry import box
 import re
 
 # ------------------------------------------------------------------
+# Version
+# ------------------------------------------------------------------
+VERSION = “2.6”
+
+# ------------------------------------------------------------------
 # Controls
 # ------------------------------------------------------------------
 # Tile adjacency: how big a gap between tiles is still “same island”
@@ -53,7 +58,7 @@ if getattr(sys, "frozen", False):
 class ClassificationQC:
     def __init__(self, root):
         self.root = root
-        self.root.title("Classification_QC_v2.6")
+        self.root.title(f"Classification QC  v{VERSION}")
         self.root.geometry("400x500")
 
         # -----------------------
@@ -157,6 +162,9 @@ class ClassificationQC:
 
         self.start_button = tk.Button(root, text="Start Processing", command=self._start_processing_impl)
         self.start_button.pack(pady=30)
+
+        self.version_label = tk.Label(root, text=f"v{VERSION}", fg="gray", font=("TkDefaultFont", 8))
+        self.version_label.pack(side="bottom", pady=4)
 
         if not self.check_lastools_license():
             return
