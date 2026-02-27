@@ -1,8 +1,10 @@
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
+import ttkbootstrap as ttkb
 import tempfile
 import shutil
 import os
+import random
 
 # ------------------------------------------------------------------
 # Silence GDAL DXF warning + set GDAL paths early
@@ -33,7 +35,40 @@ import re
 # ------------------------------------------------------------------
 # Version
 # ------------------------------------------------------------------
-VERSION = "2.6"
+VERSION = "2.7"
+
+# ------------------------------------------------------------------
+# v2.7 Changes
+# ------------------------------------------------------------------
+# GUI REDESIGN
+#   - Replaced plain tkinter layout with ttkbootstrap (cosmo theme)
+#   - Two-column layout: Main QC rasters (left) vs Optional QC (right)
+#   - Round-toggle checkboxes, LabelFrames, primary/secondary bootstyle
+#   - Bottom row: centered Start Processing button with version label
+#   - Window auto-sizes to content height; fixed width 710px
+#   - New QC_icon.ico applied to main window and all popups
+#
+# CRS — REMOVED GDAL/PROJ DATABASE DEPENDENCY
+#   - Merged GeoTIFFs previously relied on rasterio CRS lookups at
+#     runtime, requiring the PROJ database to be present and correctly
+#     pointed to by env vars. This caused silent wrong-CRS output when
+#     the database was missing or misconfigured in the frozen exe.
+#   - All five BC UTM zone CRS definitions are now hardcoded as WKT
+#     strings in _UTM_WKT (EPSG 3154–3157 and 2955).  No PROJ lookup
+#     is performed; the correct zone is resolved purely from the UTM
+#     number embedded in the source filename (e.g. "utm10").
+#   - If the filename contains no recognisable UTM zone, a clear
+#     ValueError is raised with actionable instructions instead of
+#     silently applying a wrong CRS.
+#
+# ROBUSTNESS FIXES
+#   - Entire processing pipeline wrapped in try/except; errors surface
+#     as a messagebox instead of crashing silently.
+#   - All os.system() calls now check the return code and raise
+#     RuntimeError if lasgrid64 / blast2dem64 exits non-zero.
+#   - Directory chooser rejects folders with no .las files and clears
+#     the path so processing cannot start on an invalid directory.
+# ------------------------------------------------------------------
 
 # ------------------------------------------------------------------
 # Hardcoded WKT for BC UTM zones — no PROJ database lookup needed.
@@ -75,12 +110,12 @@ class ClassificationQC:
     def __init__(self, root):
         self.root = root
         self.root.title(f"Classification QC  v{VERSION}")
-        self.root.geometry("400x500")
+        self.root.resizable(False, False)
 
         # -----------------------
         # Window icon
         # -----------------------
-        icon_name = r"Class_QC_icon.ico"
+        icon_name = r"QC_icon.ico"
 
         if getattr(sys, 'frozen', False):
             base_path = sys._MEIPASS
@@ -93,94 +128,146 @@ class ClassificationQC:
                 print(f"Failed to copy ICO to temp file: {e}")
                 icon_path = bundled_icon_path
         else:
-            icon_path = r"Z:\SPENCER_FLOYD\.ico\Class_QC_icon.ico"
+            icon_path = r"C:\Users\NSENILOV\BC_LiDAR_Production\Scripts\Classification_QC\ico\QC_icon.ico"
 
+        self.icon_path = icon_path
         try:
             root.iconbitmap(icon_path)
         except Exception as e:
             print(f"Failed to set window icon: {e}")
 
         # -----------------------
-        # UI
+        # Variables
         # -----------------------
-        self.input_dir_button = tk.Button(root, text="Select Input Directory", command=self.choose_directory)
-        self.input_dir_button.pack(pady=10)
-
-        self.input_dir_label = tk.Label(root, text="")
-        self.input_dir_label.pack()
-
         self.input_dir_path = None
-
-        self.num_cores_label = tk.Label(root, text="Number of Cores:")
-        self.num_cores_label.pack()
-
-        self.cores_var = tk.StringVar(root)
-        self.cores_var.set("4")
-        self.num_cores_combobox = ttk.Combobox(
-            root,
-            textvariable=self.cores_var,
-            values=[str(i) for i in range(1, 9)],
-            width=2
-        )
-        self.num_cores_combobox.pack()
-
-        self.main_qc_rasters_label = tk.Label(root, text="Main QC Rasters")
-        self.main_qc_rasters_label.pack(pady=10)
-
-        self.class_7_var = tk.IntVar(value=1)
-        self.class_7_checkbox = tk.Checkbutton(root, text="Outlier Density Rasters", variable=self.class_7_var)
-        self.class_7_checkbox.pack()
-
-        self.default_density_var = tk.IntVar(value=1)
-        self.default_density_checkbox = tk.Checkbutton(root, text="Default Density Rasters", variable=self.default_density_var)
-        self.default_density_checkbox.pack()
-
-        self.hillshade_var = tk.IntVar(value=1)
-        self.hillshade_checkbox = tk.Checkbutton(root, text="Hillshade Raster", variable=self.hillshade_var)
-        self.hillshade_checkbox.pack()
-
-        self.hill_step_label = tk.Label(root, text="Hillshade Resolution:")
-        self.hill_step_label.pack()
-
-        self.hill_step_var = tk.StringVar(root)
-        self.hill_step_var.set("2")
-        self.hill_step_combobox = ttk.Combobox(
-            root,
-            textvariable=self.hill_step_var,
-            values=["0.5", "1", "2"],
-            width=3
-        )
-        self.hill_step_combobox.pack()
-
-        self.optional_QC_label = tk.Label(root, text="Optional QC Rasters")
-        self.optional_QC_label.pack(pady=10)
-
-        self.ground_density_var = tk.IntVar(value=0)
-        self.ground_density_checkbox = tk.Checkbutton(root, text="Ground Density Rasters", variable=self.ground_density_var)
-        self.ground_density_checkbox.pack()
-
+        self.cores_var            = tk.StringVar(value="4")
+        self.class_7_var          = tk.IntVar(value=1)
+        self.default_density_var  = tk.IntVar(value=1)
+        self.hillshade_var        = tk.IntVar(value=1)
+        self.hill_step_var        = tk.StringVar(value="2")
+        self.ground_density_var   = tk.IntVar(value=0)
         self.high_noise_range_var = tk.IntVar(value=0)
-        self.high_noise_range_checkbox = tk.Checkbutton(root, text="High Point Range Rasters", variable=self.high_noise_range_var)
-        self.high_noise_range_checkbox.pack()
+        self.hp_step_var          = tk.StringVar(value="2")
 
-        self.hp_step_label = tk.Label(root, text="High Point Range Raster Resolution:")
-        self.hp_step_label.pack()
+        # -----------------------
+        # Layout
+        # -----------------------
+        outer = ttk.Frame(root, padding=(16, 12, 16, 8))
+        outer.pack(fill="both", expand=True)
 
-        self.hp_step_var = tk.StringVar(root)
-        self.hp_step_var.set("2")
-        self.hp_step_combobox = ttk.Combobox(
-            root,
-            textvariable=self.hp_step_var,
-            values=["0.5", "1", "2", "3", "4", "5"],
-            width=3
+        # ── Top row: directory button + cores ────────────────────────
+        top = ttk.Frame(outer)
+        top.pack(fill="x", pady=(0, 4))
+
+        ttkb.Button(
+            top, text="Select Input Directory",
+            bootstyle="secondary-outline",
+            command=self.choose_directory,
+            width=26,
+        ).pack(side="left")
+
+        ttk.Combobox(
+            top, textvariable=self.cores_var,
+            values=[str(i) for i in range(1, 17)],
+            width=3, state="readonly",
+        ).pack(side="right")
+        ttk.Label(top, text="Cores:").pack(side="right", padx=(0, 4))
+
+        self.input_dir_label = ttk.Label(
+            outer, text="No directory selected",
+            foreground="gray", wraplength=678,
         )
-        self.hp_step_combobox.pack()
+        self.input_dir_label.pack(fill="x", pady=(0, 8))
 
-        self.start_button = tk.Button(root, text="Start Processing", command=self._start_processing_impl)
-        self.start_button.pack(pady=30)
+        ttk.Separator(outer).pack(fill="x", pady=(0, 10))
 
-        self.version_label = tk.Label(root, text=f"v{VERSION}", fg="gray", font=("TkDefaultFont", 8))
-        self.version_label.pack(side="bottom", pady=4)
+        # ── Two-column panels ─────────────────────────────────────────
+        panels = ttk.Frame(outer)
+        panels.pack(fill="both", expand=False)
+        panels.columnconfigure(0, weight=1, uniform="panel")
+        panels.columnconfigure(1, weight=1, uniform="panel")
+
+        # Left — Main QC Rasters
+        main_lf = ttk.LabelFrame(
+            panels, text="  Main QC Rasters  ",
+            padding=(12, 8),
+        )
+        main_lf.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+
+        ttkb.Checkbutton(
+            main_lf, text="Outlier Density",
+            variable=self.class_7_var,
+            bootstyle="success-round-toggle",
+        ).pack(anchor="w", pady=2)
+        ttkb.Checkbutton(
+            main_lf, text="Default Density",
+            variable=self.default_density_var,
+            bootstyle="success-round-toggle",
+        ).pack(anchor="w", pady=2)
+
+        hill_frame = ttk.Frame(main_lf)
+        hill_frame.pack(fill="x", pady=2)
+        ttkb.Checkbutton(
+            hill_frame, text="Hillshade",
+            variable=self.hillshade_var,
+            bootstyle="success-round-toggle",
+        ).pack(side="left")
+        ttk.Combobox(
+            hill_frame, textvariable=self.hill_step_var,
+            values=["0.5", "1", "2"], width=4, state="readonly",
+        ).pack(side="right")
+        ttk.Label(hill_frame, text="(m):", foreground="gray").pack(side="right", padx=(0, 4))
+
+        # Right — Optional QC Rasters
+        opt_lf = ttk.LabelFrame(
+            panels, text="  Optional QC Rasters  ",
+            padding=(12, 8),
+        )
+        opt_lf.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+
+        ttkb.Checkbutton(
+            opt_lf, text="Ground Density",
+            variable=self.ground_density_var,
+            bootstyle="secondary-round-toggle",
+        ).pack(anchor="w", pady=2)
+
+
+        hp_frame = ttk.Frame(opt_lf)
+        hp_frame.pack(fill="x", pady=2)
+        ttkb.Checkbutton(
+            hp_frame, text="High Point Range",
+            variable=self.high_noise_range_var,
+            bootstyle="secondary-round-toggle",
+        ).pack(side="left")
+        ttk.Combobox(
+            hp_frame, textvariable=self.hp_step_var,
+            values=["0.5", "1", "2", "3", "4", "5"], width=4, state="readonly",
+        ).pack(side="right")
+        ttk.Label(hp_frame, text="(m):", foreground="gray").pack(side="right", padx=(0, 4))
+
+        # ── Start button ──────────────────────────────────────────────
+        ttk.Separator(outer).pack(fill="x", pady=(10, 10))
+
+        btn_row = ttk.Frame(outer)
+        btn_row.pack(fill="x")
+        btn_row.columnconfigure(0, weight=1)
+        btn_row.columnconfigure(2, weight=1)
+
+        ttkb.Button(
+            btn_row, text="Start Processing",
+            bootstyle="primary",
+            command=self._start_processing_impl,
+            width=26,
+        ).grid(row=0, column=1)
+
+        ttk.Label(
+            btn_row, text=f"v{VERSION}",
+            foreground="gray", font=("TkDefaultFont", 8),
+        ).grid(row=0, column=2, sticky="se")
+
+        # Fit window height to content, keep fixed width
+        self.root.update_idletasks()
+        self.root.geometry(f"710x{self.root.winfo_reqheight()}")
 
         if not self.check_lastools_license():
             return
@@ -210,12 +297,12 @@ class ClassificationQC:
         self.input_dir_path = filedialog.askdirectory()
         if self.input_dir_path:
             lidar_files = [file for file in os.listdir(self.input_dir_path)
-                           if file.lower().endswith(('.las', '.laz'))]
+                           if file.lower().endswith('.las')]
             if not lidar_files:
                 messagebox.showinfo(
                     "Error",
-                    "No LiDAR files found in the directory chosen. "
-                    "Choose a directory with .las or .laz files to continue."
+                    "No .las files found in the selected directory. "
+                    "Choose a directory containing .las files to continue."
                 )
                 self.input_dir_path = None
             else:
@@ -263,8 +350,11 @@ class ClassificationQC:
             utm_zone = match.group(1)
             epsg_code = utm_epsg_mapping[utm_zone]
         else:
-            epsg_code = 3156
-            print(f"Warning: Could not determine UTM zone from filename {first_filename}. Using default EPSG {epsg_code}.")
+            raise ValueError(
+                f"Cannot determine UTM zone from filename: {first_filename!r}\n\n"
+                f"Filenames must include the UTM zone number (e.g. 'utm9', 'utm10', 'utm11').\n"
+                f"Supported BC zones: UTM 7–11 (EPSG 3154, 3155, 3156, 3157, 2955)."
+            )
 
         print(f"Using EPSG:{epsg_code} for merged GeoTIFF(s).")
 
@@ -523,127 +613,204 @@ class ClassificationQC:
     # -------------------------------------------------------------------------
     def _start_processing_impl(self):
         try:
-            ...
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            messagebox.showerror("Crash", str(e))
-        if not self.input_dir_path:
-            messagebox.showinfo(
-                "Error",
-                "No input directory has been selected. Please choose a directory containing .las files."
-            )
-            return
+            if not self.input_dir_path:
+                messagebox.showinfo(
+                    "Error",
+                    "No input directory has been selected. Please choose a directory containing .las files."
+                )
+                return
 
-        if (not self.hillshade_var.get()
-            and not self.high_noise_range_var.get()
-            and not self.ground_density_var.get()
-            and not self.class_7_var.get()
-            and not self.default_density_var.get()):
-            messagebox.showinfo("Error", "No QC tests selected")
-            return
+            if (not self.hillshade_var.get()
+                and not self.high_noise_range_var.get()
+                and not self.ground_density_var.get()
+                and not self.class_7_var.get()
+                and not self.default_density_var.get()):
+                messagebox.showinfo("Error", "No QC tests selected")
+                return
 
-        qc_rasters_dir = os.path.join(self.input_dir_path, "Classification_QC_Rasters")
-        os.makedirs(qc_rasters_dir, exist_ok=True)
+            qc_rasters_dir = os.path.join(self.input_dir_path, "Classification_QC_Rasters")
+            os.makedirs(qc_rasters_dir, exist_ok=True)
 
-        cores = self.cores_var.get()
+            cores = self.cores_var.get()
+            hp_step = self.hp_step_var.get()
+            hill_step = self.hill_step_var.get()
 
-        hp_step =self.hp_step_var.get()
+            # High Point Range
+            if self.high_noise_range_var.get():
+                high_noise_range_dir = os.path.join(qc_rasters_dir, "High_Point_Range_Rasters")
+                os.makedirs(high_noise_range_dir, exist_ok=True)
+                print("Creating High Point Range Rasters...")
+                ret = os.system(
+                    f'lasgrid64 -i "{self.input_dir_path}\\*.las" '
+                    f'-nodata 0 -no_world_file -no_kml -range -cores {cores} '
+                    f'-false -nodata 0 -quiet -keep_class 1 2 3 4 5 '
+                    f'-otif -odir "{high_noise_range_dir}" -step {hp_step}'
+                )
+                if ret != 0:
+                    raise RuntimeError(f"lasgrid64 failed (exit code {ret}). Check that LASTools is installed correctly.")
+                out_base = os.path.join(high_noise_range_dir, "_High_Point_Range_Merged")
+                self.merge_geotiffs_by_island(high_noise_range_dir, out_base, "High Point Range", nodata_value=0)
+                self.print_rainbow_dashes()
 
-        hill_step =self.hill_step_var.get()
+            # Outlier Density (Class 7)
+            if self.class_7_var.get():
+                class_7_dir = os.path.join(qc_rasters_dir, "Outlier_Density")
+                os.makedirs(class_7_dir, exist_ok=True)
+                print("Creating Outlier Density tiles...")
+                ret = os.system(
+                    f'lasgrid64 -i "{self.input_dir_path}\\*.las" '
+                    f'-cores {cores} -step 6 -false -quiet '
+                    f'-no_world_file -no_kml -nodata 0 -keep_class 7 '
+                    f'-point_density -otif -odir "{class_7_dir}"'
+                )
+                if ret != 0:
+                    raise RuntimeError(f"lasgrid64 failed (exit code {ret}). Check that LASTools is installed correctly.")
+                out_base = os.path.join(class_7_dir, "_Outlier_Density_Merged")
+                self.merge_geotiffs_by_island(class_7_dir, out_base, "Outlier Density", nodata_value=0)
+                self.print_rainbow_dashes()
 
-        # High Point Range
-        if self.high_noise_range_var.get():
-            high_noise_range_dir = os.path.join(qc_rasters_dir, "High_Point_Range_Rasters")
-            os.makedirs(high_noise_range_dir, exist_ok=True)
-            print("Creating High Point Range Rasters...")
-            os.system(
-                f'lasgrid64 -i "{self.input_dir_path}\\*.las" '
-                f'-nodata 0 -no_world_file -no_kml -range -cores {cores} '
-                f'-false -nodata 0 -quiet -keep_class 1 2 3 4 5 '
-                f'-otif -odir "{high_noise_range_dir}" -step {hp_step}'
-            )
-            out_base = os.path.join(high_noise_range_dir, "_High_Point_Range_Merged")
-            self.merge_geotiffs_by_island(high_noise_range_dir, out_base, "High Point Range", nodata_value=0)
-            self.print_rainbow_dashes()
+            # Default Density (Class 1)
+            if self.default_density_var.get():
+                default_density_dir = os.path.join(qc_rasters_dir, "Default_Density")
+                os.makedirs(default_density_dir, exist_ok=True)
+                print("Creating Default Density tiles...")
+                ret = os.system(
+                    f'lasgrid64 -i "{self.input_dir_path}\\*.las" '
+                    f'-no_world_file -no_kml -cores {cores} '
+                    f'-point_density -false -nodata 0 -quiet -keep_class 1 '
+                    f'-otif -odir "{default_density_dir}" -step 6'
+                )
+                if ret != 0:
+                    raise RuntimeError(f"lasgrid64 failed (exit code {ret}). Check that LASTools is installed correctly.")
+                out_base = os.path.join(default_density_dir, "_Default_Density_Merged")
+                self.merge_geotiffs_by_island(default_density_dir, out_base, "Default Density", nodata_value=0)
+                self.print_rainbow_dashes()
 
-        # Outlier Density (Class 7)
-        if self.class_7_var.get():
-            class_7_dir = os.path.join(qc_rasters_dir, "Outlier_Density")
-            os.makedirs(class_7_dir, exist_ok=True)
-            print("Creating Outlier Density tiles...")
-            os.system(
-                f'lasgrid64 -i "{self.input_dir_path}\\*.las" '
-                f'-cores {cores} -step 6 -false -quiet '
-                f'-no_world_file -no_kml -nodata 0 -quiet -keep_class 7 '
-                f'-point_density -otif -odir "{class_7_dir}"'
-            )
-            out_base = os.path.join(class_7_dir, "_Outlier_Density_Merged")
-            self.merge_geotiffs_by_island(class_7_dir, out_base, "Outlier Density", nodata_value=0)
-            self.print_rainbow_dashes()
+            # Ground Density (Class 2)
+            if self.ground_density_var.get():
+                ground_density_dir = os.path.join(qc_rasters_dir, "Ground_Density")
+                os.makedirs(ground_density_dir, exist_ok=True)
+                print("Creating Ground Density tiles...")
+                ret = os.system(
+                    f'lasgrid64 -i "{self.input_dir_path}\\*.las" '
+                    f'-no_world_file -no_kml -cores {cores} '
+                    f'-point_density -false -nodata 0 -quiet -keep_class 2 '
+                    f'-otif -odir "{ground_density_dir}" -step 6'
+                )
+                if ret != 0:
+                    raise RuntimeError(f"lasgrid64 failed (exit code {ret}). Check that LASTools is installed correctly.")
+                out_base = os.path.join(ground_density_dir, "_Ground_Density_Merged")
+                self.merge_geotiffs_by_island(ground_density_dir, out_base, "Ground Density", nodata_value=0)
+                self.print_rainbow_dashes()
 
-        # Default Density (Class 1)
-        if self.default_density_var.get():
-            default_density_dir = os.path.join(qc_rasters_dir, "Default_Density")
-            os.makedirs(default_density_dir, exist_ok=True)
-            print("Creating Default Density tiles...")
-            os.system(
-                f'lasgrid64 -i "{self.input_dir_path}\\*.las" '
-                f'-no_world_file -no_kml -cores {cores} '
-                f'-point_density -false -nodata 0 -quiet -keep_class 1 '
-                f'-otif -odir "{default_density_dir}" -step 6'
-            )
-            out_base = os.path.join(default_density_dir, "_Default_Density_Merged")
-            self.merge_geotiffs_by_island(default_density_dir, out_base, "Default Density", nodata_value=0)
-            self.print_rainbow_dashes()
+            # Hillshade (Class 2 → blast2dem64)
+            if self.hillshade_var.get():
+                hillshade_dir = os.path.join(qc_rasters_dir, "Hillshade_Raster")
+                os.makedirs(hillshade_dir, exist_ok=True)
+                print("Creating Hillshade tiles...")
+                ret = os.system(
+                    f'blast2dem64 -i "{self.input_dir_path}\\*.las" '
+                    f'-cores {cores} -hillshade -no_kml -no_world_file '
+                    f'-nodata 0 -keep_class 2 -otif -kill 100 '
+                    f'-odir "{hillshade_dir}" -step {hill_step} >nul 2>&1'
+                )
+                if ret != 0:
+                    raise RuntimeError(f"blast2dem64 failed (exit code {ret}). Check that LASTools is installed correctly.")
+                out_base = os.path.join(hillshade_dir, "_Hillshade_Merged")
+                self.merge_geotiffs_by_island(hillshade_dir, out_base, "Hillshade", nodata_value=0)
+                self.print_rainbow_dashes()
 
-        # Ground Density (Class 2)
-        if self.ground_density_var.get():
-            ground_density_dir = os.path.join(qc_rasters_dir, "Ground_Density")
-            os.makedirs(ground_density_dir, exist_ok=True)
-            print("Creating Ground Density tiles...")
-            os.system(
-                f'lasgrid64 -i "{self.input_dir_path}\\*.las" '
-                f'-no_world_file -no_kml -cores {cores} '
-                f'-point_density -false -nodata 0 -quiet -keep_class 2 '
-                f'-otif -odir "{ground_density_dir}" -step 6'
-            )
-            out_base = os.path.join(ground_density_dir, "_Ground_Density_Merged")
-            self.merge_geotiffs_by_island(ground_density_dir, out_base, "Ground Density", nodata_value=0)
-            self.print_rainbow_dashes()
-
-        # Hillshade (Class 2 → blast2dem64)
-        if self.hillshade_var.get():
-            hillshade_dir = os.path.join(qc_rasters_dir, "Hillshade_Raster")
-            os.makedirs(hillshade_dir, exist_ok=True)
-            print("Creating Hillshade tiles...")
-            os.system(
-                f'blast2dem64 -i "{self.input_dir_path}\\*.las" '
-                f'-cores {cores} -hillshade -no_kml -no_world_file '
-                f'-nodata 0 -keep_class 2 -otif -kill 100 '
-                f'-odir "{hillshade_dir}" -step {hill_step} >nul 2>&1'
-            )
-            out_base = os.path.join(hillshade_dir, "_Hillshade_Merged")
-            self.merge_geotiffs_by_island(hillshade_dir, out_base, "Hillshade", nodata_value=0)
-            self.print_rainbow_dashes()
-
-        # COMPLETE
-        print(f"""{Fore.LIGHTGREEN_EX}
+            # COMPLETE
+            print(f"""{Fore.LIGHTGREEN_EX}
         ( C | O | M | P | L | E | T | E )
         {Style.RESET_ALL}
         """)
 
-        result = messagebox.askquestion(
-            "Complete",
-            "Classification QC Rasters Complete. Would you like to open the output directory?",
-            icon="question",
-            parent=self.root
-        )
-        if result == "yes":
-            os.startfile(qc_rasters_dir)
+            self._show_celebration(qc_rasters_dir)
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            messagebox.showerror("Error", str(e))
+
+
+    def _show_celebration(self, output_dir):
+        BG = "#1e1e1e"
+
+        win = tk.Toplevel(self.root)
+        win.title("Complete!")
+        win.geometry("480x270")
+        win.resizable(False, False)
+        win.grab_set()
+        win.after(50, lambda: win.iconbitmap(self.icon_path))
+
+        canvas = tk.Canvas(win, highlightthickness=0, bd=0, width=480, height=270)
+        canvas.pack(fill="both", expand=True)
+
+        # Full dark background drawn as a rectangle (immune to theme overrides)
+        canvas.create_rectangle(0, 0, 480, 270, fill=BG, outline="")
+
+        canvas.create_text(240, 100, text="Classification QC Complete!",
+                           font=("TkDefaultFont", 13, "bold"), fill="white")
+        canvas.create_text(240, 126, text="All rasters processed successfully.",
+                           font=("TkDefaultFont", 10), fill="#666666")
+
+        colors = ["#FF6B6B", "#FFE66D", "#4ECDC4", "#45B7D1", "#96CEB4",
+                  "#FF9FF3", "#54A0FF", "#FFA07A", "#98FB98", "#DDA0DD"]
+        pieces = []
+        for _ in range(55):
+            x = random.randint(0, 480)
+            y = random.randint(-250, 0)
+            w = random.randint(8, 16)
+            h = random.randint(4, 9)
+            color = random.choice(colors)
+            dx = random.uniform(-1.5, 1.5)
+            dy = random.uniform(2.5, 6.0)
+            if random.random() < 0.5:
+                item = canvas.create_rectangle(x, y, x + w, y + h, fill=color, outline="")
+            else:
+                item = canvas.create_oval(x, y, x + w, y + w, fill=color, outline="")
+            pieces.append({"id": item, "x": x, "y": y, "w": w, "h": h, "dx": dx, "dy": dy})
+
+        running = [True]
+
+        def animate():
+            if not running[0]:
+                return
+            for p in pieces:
+                p["x"] += p["dx"]
+                p["y"] += p["dy"]
+                p["dy"] = min(p["dy"] + 0.07, 10)
+                if p["y"] > 270:
+                    p["y"] = random.randint(-30, -5)
+                    p["x"] = random.randint(0, 480)
+                    p["dy"] = random.uniform(2.5, 5.5)
+                canvas.coords(p["id"], p["x"], p["y"], p["x"] + p["w"], p["y"] + p["h"])
+            win.after(20, animate)
+
+        animate()
+
+        def close():
+            running[0] = False
+            win.destroy()
+
+        def open_folder():
+            running[0] = False
+            win.destroy()
+            os.startfile(output_dir)
+
+        # Place buttons directly in canvas (no frame bg gap between them)
+        btn_open = ttkb.Button(canvas, text="Open Output Folder",
+                               bootstyle="success", command=open_folder, width=20)
+        btn_done = ttkb.Button(canvas, text="Done",
+                               bootstyle="success", command=close, width=10)
+        canvas.create_window(160, 210, window=btn_open)
+        canvas.create_window(365, 210, window=btn_done)
+
+        win.protocol("WM_DELETE_WINDOW", close)
 
 
 if __name__ == "__main__":
-    root = tk.Tk()
+    root = ttkb.Window(themename="cosmo")
     app = ClassificationQC(root)
     root.mainloop()

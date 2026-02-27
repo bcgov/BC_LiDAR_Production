@@ -1,19 +1,35 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_all
+
+ttkb_datas, ttkb_binaries, ttkb_hiddenimports = collect_all('ttkbootstrap')
+
+ICO = r'C:\Users\NSENILOV\BC_LiDAR_Production\Scripts\Classification_QC\ico\QC_icon.ico'
 
 a = Analysis(
     ['Classification_QC.py'],
     pathex=[],
-    binaries=[],
-    datas=[],
+    binaries=ttkb_binaries,
+    datas=ttkb_datas + [(ICO, '.')],
     hiddenimports=[
         'rasterio',
         'rasterio.merge',
         'rasterio.crs',
+        'rasterio.transform',
+        'rasterio.sample',
+        'rasterio.vrt',
+        'rasterio.features',
+        'rasterio.warp',
+        'rasterio.mask',
+        'rasterio.windows',
+        'rasterio.plot',
         'rasterio._env',
         'rasterio.env',
         'colorama',
         'numpy',
-    ],
+        'PIL',
+        'PIL.Image',
+        'PIL.ImageTk',
+    ] + ttkb_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -42,5 +58,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=[r'Z:\SPENCER_FLOYD\.ico\Classification_QC.ico'],
+    icon=[ICO],
 )
