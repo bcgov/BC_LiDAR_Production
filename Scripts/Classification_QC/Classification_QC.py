@@ -27,19 +27,30 @@ import sys
 from colorama import Fore, Style
 import numpy as np
 from rasterio.crs import CRS
-from rasterio.merge import merge
-from shapely.geometry import box
+from rasterio.transform import from_bounds
 import re
 
 # ------------------------------------------------------------------
 # Version
 # ------------------------------------------------------------------
-VERSION = “2.6”
+VERSION = "2.6"
+
+# ------------------------------------------------------------------
+# Hardcoded WKT for BC UTM zones — no PROJ database lookup needed.
+# Update central_meridian / AUTHORITY if adding new zones.
+# ------------------------------------------------------------------
+_UTM_WKT = {
+    3154: 'PROJCS["NAD83(CSRS) / UTM zone 7N",GEOGCS["NAD83(CSRS)",DATUM["NAD83_Canadian_Spatial_Reference_System",SPHEROID["GRS 1980",6378137,298.257222101]],PRIMEM["Greenwich",0],UNIT["degree",0.0174532925199433]],PROJECTION["Transverse_Mercator"],PARAMETER["latitude_of_origin",0],PARAMETER["central_meridian",-141],PARAMETER["scale_factor",0.9996],PARAMETER["false_easting",500000],PARAMETER["false_northing",0],UNIT["metre",1],AUTHORITY["EPSG","3154"]]',
+    3155: 'PROJCS["NAD83(CSRS) / UTM zone 8N",GEOGCS["NAD83(CSRS)",DATUM["NAD83_Canadian_Spatial_Reference_System",SPHEROID["GRS 1980",6378137,298.257222101]],PRIMEM["Greenwich",0],UNIT["degree",0.0174532925199433]],PROJECTION["Transverse_Mercator"],PARAMETER["latitude_of_origin",0],PARAMETER["central_meridian",-135],PARAMETER["scale_factor",0.9996],PARAMETER["false_easting",500000],PARAMETER["false_northing",0],UNIT["metre",1],AUTHORITY["EPSG","3155"]]',
+    3156: 'PROJCS["NAD83(CSRS) / UTM zone 9N",GEOGCS["NAD83(CSRS)",DATUM["NAD83_Canadian_Spatial_Reference_System",SPHEROID["GRS 1980",6378137,298.257222101]],PRIMEM["Greenwich",0],UNIT["degree",0.0174532925199433]],PROJECTION["Transverse_Mercator"],PARAMETER["latitude_of_origin",0],PARAMETER["central_meridian",-129],PARAMETER["scale_factor",0.9996],PARAMETER["false_easting",500000],PARAMETER["false_northing",0],UNIT["metre",1],AUTHORITY["EPSG","3156"]]',
+    3157: 'PROJCS["NAD83(CSRS) / UTM zone 10N",GEOGCS["NAD83(CSRS)",DATUM["NAD83_Canadian_Spatial_Reference_System",SPHEROID["GRS 1980",6378137,298.257222101]],PRIMEM["Greenwich",0],UNIT["degree",0.0174532925199433]],PROJECTION["Transverse_Mercator"],PARAMETER["latitude_of_origin",0],PARAMETER["central_meridian",-123],PARAMETER["scale_factor",0.9996],PARAMETER["false_easting",500000],PARAMETER["false_northing",0],UNIT["metre",1],AUTHORITY["EPSG","3157"]]',
+    2955: 'PROJCS["NAD83(CSRS) / UTM zone 11N",GEOGCS["NAD83(CSRS)",DATUM["NAD83_Canadian_Spatial_Reference_System",SPHEROID["GRS 1980",6378137,298.257222101]],PRIMEM["Greenwich",0],UNIT["degree",0.0174532925199433]],PROJECTION["Transverse_Mercator"],PARAMETER["latitude_of_origin",0],PARAMETER["central_meridian",-117],PARAMETER["scale_factor",0.9996],PARAMETER["false_easting",500000],PARAMETER["false_northing",0],UNIT["metre",1],AUTHORITY["EPSG","2955"]]',
+}
 
 # ------------------------------------------------------------------
 # Controls
 # ------------------------------------------------------------------
-# Tile adjacency: how big a gap between tiles is still “same island”
+# Tile adjacency: how big a gap between tiles is still "same island"
 ADJACENCY_TILE_GAP_FACTOR = 0.01   # 1% of tile width
 
 # Island-level bbox merge: how much to expand island bboxes
@@ -53,6 +64,11 @@ if getattr(sys, "frozen", False):
     base_path = sys._MEIPASS
     os.environ["GDAL_DATA"] = os.path.join(base_path, "gdal_data")
     os.environ["PROJ_LIB"] = os.path.join(base_path, "proj_data")
+
+
+def _bbox_intersects(a, b):
+    """Return True if two (minx, miny, maxx, maxy) bboxes overlap."""
+    return not (a[2] <= b[0] or b[2] <= a[0] or a[3] <= b[1] or b[3] <= a[1])
 
 
 class ClassificationQC:
@@ -261,7 +277,7 @@ class ClassificationQC:
             for fp in tif_files:
                 with rasterio.open(fp) as src:
                     b = src.bounds
-                    geometries.append(box(b.left, b.bottom, b.right, b.top))
+                    geometries.append((b.left, b.bottom, b.right, b.top))
                     widths.append(b.right - b.left)
 
         if not geometries:
@@ -272,7 +288,7 @@ class ClassificationQC:
         tile_gap = tile_width * ADJACENCY_TILE_GAP_FACTOR
 
         # Buffered geometries for adjacency
-        buffered_tiles = [g.buffer(tile_gap) for g in geometries]
+        buffered_tiles = [(g[0]-tile_gap, g[1]-tile_gap, g[2]+tile_gap, g[3]+tile_gap) for g in geometries]
 
         # -------------------------------------------------
         # 4) Build tile-level islands (connectivity)
@@ -293,7 +309,7 @@ class ClassificationQC:
                 for j in range(n):
                     if j in used:
                         continue
-                    if gcur_buff.intersects(geometries[j]):
+                    if _bbox_intersects(gcur_buff, geometries[j]):
                         used.add(j)
                         q.append(j)
                         isl.append(j)
@@ -308,15 +324,15 @@ class ClassificationQC:
         for isl in tile_islands:
             xs_min, ys_min, xs_max, ys_max = [], [], [], []
             for idx in isl:
-                minx, miny, maxx, maxy = geometries[idx].bounds
+                minx, miny, maxx, maxy = geometries[idx]
                 xs_min.append(minx); ys_min.append(miny); xs_max.append(maxx); ys_max.append(maxy)
 
             expand_x = tile_width * ISLAND_BBOX_GAP_FACTOR
             expand_y = tile_width * ISLAND_BBOX_GAP_FACTOR
 
             island_boxes.append(
-                box(min(xs_min) - expand_x, min(ys_min) - expand_y,
-                    max(xs_max) + expand_x, max(ys_max) + expand_y)
+                (min(xs_min) - expand_x, min(ys_min) - expand_y,
+                 max(xs_max) + expand_x, max(ys_max) + expand_y)
             )
 
         # -------------------------------------------------
@@ -338,7 +354,7 @@ class ClassificationQC:
                 for j in range(m):
                     if j in used_islands:
                         continue
-                    if cur_box.intersects(island_boxes[j]):
+                    if _bbox_intersects(cur_box, island_boxes[j]):
                         used_islands.add(j)
                         q.append(j)
                         grp.append(j)
@@ -379,7 +395,39 @@ class ClassificationQC:
                 continue
 
             try:
-                mosaic, out_transform = merge(srcs, nodata=nodata_value)
+                # Manual numpy mosaic — avoids rasterio.merge() which causes
+                # a native GDAL crash with certain LAStools GeoTIFF outputs.
+                all_bounds = [s.bounds for s in srcs]
+                out_left   = min(b.left   for b in all_bounds)
+                out_bottom = min(b.bottom for b in all_bounds)
+                out_right  = max(b.right  for b in all_bounds)
+                out_top    = max(b.top    for b in all_bounds)
+                res_x, res_y = srcs[0].res
+                out_width  = max(1, round((out_right - out_left)   / res_x))
+                out_height = max(1, round((out_top   - out_bottom) / res_y))
+                out_transform = from_bounds(out_left, out_bottom, out_right, out_top,
+                                            out_width, out_height)
+                out_count = srcs[0].count
+                out_dtype = srcs[0].dtypes[0]
+                mosaic = np.full((out_count, out_height, out_width),
+                                 nodata_value, dtype=out_dtype)
+                for src in srcs:
+                    col_off = max(0, round((src.bounds.left - out_left)  / res_x))
+                    row_off = max(0, round((out_top - src.bounds.top)    / res_y))
+                    data = src.read()
+                    h = min(data.shape[1], out_height - row_off)
+                    w = min(data.shape[2], out_width  - col_off)
+                    if h <= 0 or w <= 0:
+                        continue
+                    patch = data[:, :h, :w]
+                    valid = patch != nodata_value
+                    mosaic[:, row_off:row_off+h, col_off:col_off+w] = np.where(
+                        valid, patch,
+                        mosaic[:, row_off:row_off+h, col_off:col_off+w]
+                    )
+
+                # Hardcoded WKT — no PROJ database lookup.
+                src_crs = CRS.from_wkt(_UTM_WKT[epsg_code])
 
                 meta = srcs[0].meta.copy()
                 meta.update({
@@ -389,7 +437,7 @@ class ClassificationQC:
                     "transform": out_transform,
                     "nodata": nodata_value,
                     "count": mosaic.shape[0],
-                    "crs": CRS.from_epsg(epsg_code),
+                    "crs": src_crs,
                     "compress": "LZW",
                     "tiled": True,
                     "blockxsize": 256,
