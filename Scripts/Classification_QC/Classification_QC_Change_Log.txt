@@ -51,3 +51,15 @@ Classification_QC_v2.5 - November 21st, 2025
 
 Classification_QC_v2.6 - December 31st, 2025
 - resolution options added for Hillshade and High Point Range Rasters
+
+Classification_QC_v2.7 - February 27th, 2026 (update by Nikolay Senilov
+- Renamed Classification_QC_v2.6.py → Classification_QC.py
+- Added VERSION = "2.6" constant (single place to update each release)
+- Window title now uses VERSION dynamically
+- Added small gray version label to bottom of GUI
+- GUI: Replaced plain tkinter layout with ttkbootstrap (cosmo theme).
+- Two-column panel separating Main QC and Optional QC rasters, round-toggle checkboxes, auto-sized window height, new QC_icon.ico applied everywhere.
+- Added confetti
+- CRS: Removed runtime GDAL/PROJ database dependency. All five BC UTM zone CRS definitions (EPSG 3154-3157, 2955) are now hardcoded WKT strings in _UTM_WKT. Zone is resolved from the UTM number in the source filename; unrecognised filenames raise a clear ValueError instead of silently writing a wrong CRS to merged output.
+- Robustness: Full try/except around processing pipeline, os.system return code checks for lasgrid64/blast2dem64, .las-only directory validation.
+- Spec: Updated to collect_all('ttkbootstrap') and bundle QC_icon.ico.
