@@ -53,7 +53,7 @@ _ensure_streams()
 warnings.filterwarnings("ignore", category=UserWarning, module="pkg_resources")
 
 # Version of the executable
-version = '4.1'
+version = '4.1.1'
 
 # --- Helper for resource loading (works for PyInstaller) ---
 def resource_path(relative_path):
@@ -587,19 +587,18 @@ def organize_las_files(las_directory):
     """
     las_directory = os.path.normpath(las_directory)
 
-    urban_dir = os.path.join(las_directory, "Urban")
     regular_dir = os.path.join(las_directory, "Regular")
-    os.makedirs(urban_dir, exist_ok=True)
+    urban_dir = os.path.join(las_directory, "Urban")
     os.makedirs(regular_dir, exist_ok=True)
 
     # Helper: file stem (no extension)
     def stem(name: str) -> str:
         return os.path.splitext(str(name))[0].lower()
 
-    # If no pickle, we can't sort — but still show both paths
+    # If no pickle, we can't sort — put everything in Regular
     if not os.path.exists(pickle_path):
         print("⚠️ No pickle file found — skipping Urban/Regular sort.")
-        return [urban_dir, regular_dir]
+        return [regular_dir]
 
     # Load and normalize urban tile identifiers
     with open(pickle_path, "rb") as f:
@@ -626,20 +625,25 @@ def organize_las_files(las_directory):
         if not is_urban:
             is_urban = any(u in file_stem for u in urban_stems)
 
-        dest_folder = urban_dir if is_urban else regular_dir
-        shutil.move(os.path.join(las_directory, filename), os.path.join(dest_folder, filename))
-
         if is_urban:
+            os.makedirs(urban_dir, exist_ok=True)
+            dest_folder = urban_dir
             moved_urban += 1
         else:
+            dest_folder = regular_dir
             moved_regular += 1
 
+        shutil.move(os.path.join(las_directory, filename), os.path.join(dest_folder, filename))
+
     print(f"[SORT] Moved Urban: {moved_urban} | Regular: {moved_regular}")
-    print(f"[SORT] Urban dir: {urban_dir}")
     print(f"[SORT] Regular dir: {regular_dir}")
 
-    # Always return both paths so the popup shows both
-    return [regular_dir, urban_dir]
+    result = [regular_dir]
+    if moved_urban > 0:
+        print(f"[SORT] Urban dir: {urban_dir}")
+        result.append(urban_dir)
+
+    return result
 
 # --- Main processing logic ---
 def create_macro_file(directory, num_cores):
