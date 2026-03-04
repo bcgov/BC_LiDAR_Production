@@ -46,3 +46,22 @@ Classification_Macro_Generator_v2.5 - July 11th, 2025
 Classification_Macro_Generator_v3.0 - November 14th, 2025
 - tiles are split into Urban and Regular folders with separate macros created for each with different ground parameters
 - icon now built into the executable
+
+Classification_Macro_Generator_v4.0 - January 13th, 2026
+- added a second workflow to copy LAZ tiles from a source location to a destination, then convert + generate macros
+- added safe copy behavior (copy to .part then rename) and an option to overwrite or skip existing files
+- added download progress + speed reporting (percent, files copied, MiB/s) in the GUI
+- added per-tile conversion with a user-selected max conversions setting (parallel conversion)
+- updated file organization so Urban vs Regular matching uses tile stems (more reliable) and the app reports both output folder paths consistently
+- suppressed LAStools pop-up windows during conversion (stdout/stderr captured and printed to the app console)
+- improved packaged-build console behavior (guards missing stdout/stderr; tqdm only disabled when no console streams exist)
+- redesigned the GUI using ttk styling with a clearer two-column layout for the two workflows
+
+Classification_Macro_Generator_v4.1 - February 12th, 2026
+- updated urban_tiles.pkl from new urban area polygons
+- regenerated urban_tiles.pkl from urban_tiles.gpkg (3,028 tiles, down from 30,474) to reflect updated urban area boundaries
+- added .gitignore for PyInstaller build artifacts
+
+Classification_Macro_Generator_v4.1.1 - March 4th, 2026
+- fixed Urban folder creation: folder is now only created if urban tiles are actually detected
+- previously an empty Urban folder was always created regardless of whether any tiles matched
