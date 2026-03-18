@@ -438,7 +438,7 @@ BG_MAIN = "#f0f0f0"
 # -----------------------------------------------------------------------------
 # Constants
 # -----------------------------------------------------------------------------
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.5.0"
 
 WATER_GPKG_TEMPLATE = "Water_UTM{zone:02d}_buf50m_tilebbox.gpkg"
 WATER_LAYER_TEMPLATE = "water_utm{zone:02d}_buf50m"
@@ -1094,15 +1094,20 @@ def process_raster(raster_path: str, pass_utm_folder: str, fail_rasters_utm_fold
             elapsed = time.perf_counter() - t_start
             return (filename, "SKIP", f"Unsupported UTM zone: {utm_number}", f"{elapsed:.2f}s")
 
-        # tile name key (expecting something like: <prefix>_<a>_<b>_<c>_<d>_... .tif)
+        # tile name key – try multiple conventions:
+        #   Old: bc_<a>_<b>_<c>_<d>_utm*.tif  → parts[1:5]
+        #   New: <a>_<b>_<c>_<d>_utm*_date.tif → parts[0:4]
         parts = filename.split("_")
-        if len(parts) < 5:
-            elapsed = time.perf_counter() - t_start
-            return (filename, "SKIP", "Filename does not match expected tile pattern (needs >= 5 underscore parts)", f"{elapsed:.2f}s")
-
-        tile_key = "".join(parts[1:5]).lower()
-
-        tile_entry = _TILE_DICT.get(tile_key) if _TILE_DICT else None
+        tile_entry = None
+        tile_key = None
+        if _TILE_DICT:
+            for start, end in [(1, 5), (0, 4)]:
+                if end <= len(parts):
+                    candidate = "".join(parts[start:end]).lower()
+                    if candidate in _TILE_DICT:
+                        tile_key = candidate
+                        tile_entry = _TILE_DICT[tile_key]
+                        break
         if tile_entry is None:
             elapsed = time.perf_counter() - t_start
             return (filename, "SKIP", "No matching tile geometry", f"{elapsed:.2f}s")
@@ -1389,9 +1394,12 @@ def run_density_check(cfg: dict, input_dir, custom_output_dir=None, workers=DEFA
     lasgrid_out = os.path.join(internal_root, "_lasgrid_out")
     os.makedirs(lasgrid_out, exist_ok=True)
 
-    input_files = sorted(glob.glob(os.path.join(input_dir, "*.laz")))
+    input_files = sorted(
+        glob.glob(os.path.join(input_dir, "*.laz"))
+        + glob.glob(os.path.join(input_dir, "*.las"))
+    )
     if not input_files:
-        messagebox.showerror("Error", "No .laz files found in the input directory.")
+        messagebox.showerror("Error", "No .laz or .las files found in the input directory.")
         return
 
     # Map: input stem -> full path
@@ -1601,7 +1609,7 @@ def run_density_check(cfg: dict, input_dir, custom_output_dir=None, workers=DEFA
                 log_file.write(f"Input Directory: {input_dir}\n")
                 log_file.write(f"Output Directory: {output_root}\n")
                 log_file.write(f"Workers: {workers}\n")
-                log_file.write(f"Input Files: {len(input_files)} .laz files\n\n")
+                log_file.write(f"Input Files: {len(input_files)} .laz/.las files\n\n")
 
                 log_file.write("=" * 80 + "\n")
                 log_file.write("CONFIGURATION\n")
@@ -1950,7 +1958,7 @@ def launch_gui():
             self.cfg = new_cfg
 
         def browse_input_directory(self):
-            folder = filedialog.askdirectory(title="Select Input Directory with .laz files")
+            folder = filedialog.askdirectory(title="Select Input Directory with .laz/.las files")
             if folder:
                 self.input_dir.set(folder)
 

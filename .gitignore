@@ -1,0 +1,13 @@
+# PyInstaller build artifacts
+build/
+dist/
+
+# Executables
+*.exe
+
+# Large data files
+*.gpkg
+*.properties
+
+# Windows artifacts
+nul
