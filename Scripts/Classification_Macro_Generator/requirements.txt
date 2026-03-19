@@ -1,0 +1,6 @@
+laspy
+pyproj
+tqdm
+colorama
+numpy
+pyinstaller
