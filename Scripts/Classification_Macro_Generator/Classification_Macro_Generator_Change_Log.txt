@@ -65,3 +65,8 @@ Classification_Macro_Generator_v4.1 - February 12th, 2026
 Classification_Macro_Generator_v4.1.1 - March 4th, 2026
 - fixed Urban folder creation: folder is now only created if urban tiles are actually detected
 - previously an empty Urban folder was always created regardless of whether any tiles matched
+
+Classification_Macro_Generator_v4.1.2 - March 19th, 2026
+- disabled UPX compression in PyInstaller build to fix NumPy DLL crash
+- added build script (build.bat) for reproducible builds
+- updated build script to use geo_env conda Python and bundle pyproj native DLLs
