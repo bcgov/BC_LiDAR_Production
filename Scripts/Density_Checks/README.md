@@ -29,16 +29,26 @@ Density_Checks/
 
 ### First time only — set up your machine
 
+**Install these (all free):**
+
+| Tool | Why | Download |
+|---|---|---|
+| **Git** | Pull and push code | https://git-scm.com/download/win |
+| **Miniconda** (or Anaconda) | Python environment for the build | https://docs.conda.io/projects/miniconda/en/latest/ |
+| **Inno Setup** | Compiles the Windows installer | https://jrsoftware.org/isdl.php |
+| **VS Code** (or any editor) | Editing the Python script | https://code.visualstudio.com/ |
+
+**Then:**
+
 1. **Clone the repo**
    ```
    git clone https://github.com/bcgov/BC_LiDAR_Production.git
    ```
-2. **Install Inno Setup** — https://jrsoftware.org/isdl.php (free, standard installer).
-3. **Create the conda env** — one command:
+2. **Create the conda env** — in Anaconda Prompt, one command:
    ```
    conda create -n geo_env python=3.11 -c conda-forge rasterio fiona shapely pyproj numpy certifi colorama pyinstaller
    ```
-4. **Map the `V:` drive** to the Production NAS (ask your sysadmin if it's not already mapped).
+3. **Map the `V:` drive** to the Production NAS (ask your sysadmin if it's not already mapped).
 
 ### Every release — the six steps
 
