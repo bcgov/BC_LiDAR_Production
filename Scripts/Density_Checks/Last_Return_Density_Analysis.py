@@ -1081,18 +1081,18 @@ def process_raster(raster_path: str, pass_utm_folder: str, fail_rasters_utm_fold
     try:
         if os.path.getsize(raster_path) < 1024:
             elapsed = time.perf_counter() - t_start
-            return (filename, "SKIP", "File is < 1 KB", f"{elapsed:.2f}s")
+            return (filename, "SKIP", "File is < 1 KB", f"{elapsed:.2f}s", "")
 
         match = UTM_RE.search(filename)
         if not match:
             elapsed = time.perf_counter() - t_start
-            return (filename, "SKIP", "Could not find UTM zone in filename", f"{elapsed:.2f}s")
+            return (filename, "SKIP", "Could not find UTM zone in filename", f"{elapsed:.2f}s", "")
 
         utm_number = int(match.group(1))
         utm_tag = f"utm{utm_number}"
         if utm_tag not in EPSG_BY_UTM:
             elapsed = time.perf_counter() - t_start
-            return (filename, "SKIP", f"Unsupported UTM zone: {utm_number}", f"{elapsed:.2f}s")
+            return (filename, "SKIP", f"Unsupported UTM zone: {utm_number}", f"{elapsed:.2f}s", "")
 
         # tile name key – try multiple conventions:
         #   Old: bc_<a>_<b>_<c>_<d>_utm*.tif  → parts[1:5]
@@ -1110,7 +1110,7 @@ def process_raster(raster_path: str, pass_utm_folder: str, fail_rasters_utm_fold
                         break
         if tile_entry is None:
             elapsed = time.perf_counter() - t_start
-            return (filename, "SKIP", "No matching tile geometry", f"{elapsed:.2f}s")
+            return (filename, "SKIP", "No matching tile geometry", f"{elapsed:.2f}s", "")
         
         with rasterio.open(raster_path) as src:
             data = src.read(1)
@@ -1138,13 +1138,13 @@ def process_raster(raster_path: str, pass_utm_folder: str, fail_rasters_utm_fold
         res_y = -src_transform.e if src_transform.e < 0 else src_transform.e
         if res_x == 0 or res_y == 0:
             elapsed = time.perf_counter() - t_start
-            return (filename, "ERROR", "Invalid source resolution", f"{elapsed:.2f}s")
+            return (filename, "ERROR", "Invalid source resolution", f"{elapsed:.2f}s", "")
 
         out_width = int(np.ceil((maxx - minx) / res_x))
         out_height = int(np.ceil((maxy - miny) / res_y))
         if out_width <= 0 or out_height <= 0:
             elapsed = time.perf_counter() - t_start
-            return (filename, "ERROR", "Computed non-positive output dimensions", f"{elapsed:.2f}s")
+            return (filename, "ERROR", "Computed non-positive output dimensions", f"{elapsed:.2f}s", "")
 
         # Snap to the SAME pixel size as the source raster.
         # Using ceil() means this grid may extend slightly past the tile bounds, which is fine

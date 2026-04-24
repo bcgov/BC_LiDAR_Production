@@ -15,6 +15,40 @@ if errorlevel 1 (
 echo Conda environment activated
 echo.
 
+REM ---- Sync data assets from network NAS ----
+REM Pulls Tiles_by_UTM and Water_by_UTM from the canonical V: drive location.
+REM Robocopy is fast for already-synced trees and handles updates automatically.
+REM Override the source by setting DATA_SOURCE before running this script.
+if not defined DATA_SOURCE set "DATA_SOURCE=V:\Production_NAS\Supporting_Production_Files\Top_common\Software\GeoBC\Last_Return_Density_Checker\data"
+
+echo Syncing data assets from:
+echo   %DATA_SOURCE%
+
+if not exist "%DATA_SOURCE%" (
+    echo.
+    echo ERROR: Cannot access network data source.
+    echo Make sure the V: drive is mapped and you have NAS access.
+    pause
+    exit /b 1
+)
+
+robocopy "%DATA_SOURCE%\Tiles_by_UTM" "data\Tiles_by_UTM" /E /MT:8 /NFL /NDL /NJH /NJS
+if errorlevel 8 (
+    echo ERROR: Failed to sync Tiles_by_UTM from V: drive.
+    pause
+    exit /b 1
+)
+
+robocopy "%DATA_SOURCE%\Water_by_UTM" "data\Water_by_UTM" /E /MT:8 /NFL /NDL /NJH /NJS
+if errorlevel 8 (
+    echo ERROR: Failed to sync Water_by_UTM from V: drive.
+    pause
+    exit /b 1
+)
+
+echo Data assets synced.
+echo.
+
 REM ---- Sync PROJ and GDAL data ----
 REM This script imports rasterio, finds the EXACT proj.db it uses,
 REM copies it into data/proj/, then VERIFIES every BC UTM EPSG code.

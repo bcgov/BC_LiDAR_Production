@@ -8,7 +8,8 @@
 #define MyAppExeName "LastReturnDensityChecker.exe"
 
 ; Folder that contains the EXE (from PyInstaller output)
-#define MyAppSourceDir "D:\Special_Projects\Density_Test\Last_Return_Density_Checker\dist\LastReturnDensityChecker"
+; Relative to this .iss file — produced by running build.bat
+#define MyAppSourceDir "dist\LastReturnDensityChecker"
 
 ; Generate a stable GUID for upgrades (Tools -> Generate GUID in Inno Setup)
 ; IMPORTANT: Replace this with your own GUID or use the one from your v1.0
