@@ -25,37 +25,48 @@ Density_Checks/
 
 ---
 
-## Quick start: building the installer
+## How to update the app and release a new installer
 
-Anyone with this repo cloned and the BC NAS (`V:` drive) mapped can produce a fresh installer with three steps:
+### First time only — set up your machine
 
-1. **Set up the conda env** (one time):
+1. **Clone the repo**
    ```
-   conda create -n geo_env python=3.11 -c conda-forge ^
-       rasterio fiona shapely pyproj numpy certifi colorama pyinstaller
+   git clone https://github.com/bcgov/BC_LiDAR_Production.git
    ```
-   (Or use any existing env named `geo_env` that has these packages. Edit the `conda activate geo_env` line in `build.bat` if your env has a different name.)
+2. **Install Inno Setup** — https://jrsoftware.org/isdl.php (free, standard installer).
+3. **Create the conda env** — one command:
+   ```
+   conda create -n geo_env python=3.11 -c conda-forge rasterio fiona shapely pyproj numpy certifi colorama pyinstaller
+   ```
+4. **Map the `V:` drive** to the Production NAS (ask your sysadmin if it's not already mapped).
 
-2. **Build the EXE** — from inside `Scripts/Density_Checks/`:
+### Every release — the six steps
+
+1. **Pull the latest code**
+   ```
+   git pull
+   ```
+2. **Edit** [Last_Return_Density_Analysis.py](Last_Return_Density_Analysis.py) — make your changes and save.
+3. **Bump the version** in [installer.iss](installer.iss) — change this line to the new version:
+   ```
+   #define MyAppVersion "1.5.0"
+   ```
+4. **Build the EXE** — from inside `Scripts/Density_Checks/`:
    ```
    build.bat
    ```
-   This will:
-   - Activate the conda env.
-   - Robocopy `Tiles_by_UTM/` and `Water_by_UTM/` from V: into `data/` (skips files that are already up to date).
-   - Run `sync_proj_data.py` to bundle the correct PROJ/GDAL data.
-   - Run PyInstaller using `LastReturnDensityChecker.spec`.
-   - Output: `dist\LastReturnDensityChecker\LastReturnDensityChecker.exe`
+   Produces `dist\LastReturnDensityChecker\LastReturnDensityChecker.exe`.
+5. **Compile the installer** — open [installer.iss](installer.iss) in Inno Setup Compiler and press `F9`. Produces `installer_output\LastReturnDensityChecker_Setup_<version>.exe`.
+6. **Distribute and commit**
+   - Copy the new installer into `V:\Production_NAS\Supporting_Production_Files\Top_common\Software\GeoBC\Last_Return_Density_Checker\`, and move the old installer into the `Superceded\` subfolder there.
+   - Then push your source changes:
+     ```
+     git add Scripts/Density_Checks/
+     git commit -m "feat: Last Return Density Checker vX.Y.Z — <what changed>"
+     git push
+     ```
 
-3. **Compile the installer** — open `installer.iss` in Inno Setup (https://jrsoftware.org/isinfo.php) and click "Compile". Output lands in `installer_output\LastReturnDensityChecker_Setup_<version>.exe`.
-
-That's it. The resulting setup `.exe` is self-contained and installs without admin rights to `%LOCALAPPDATA%\GeoBC\LastReturnDensityChecker`.
-
-### Editing the application
-
-Edit [Last_Return_Density_Analysis.py](Last_Return_Density_Analysis.py), then re-run `build.bat`. To bump the version number, update both:
-- `installer.iss` — `#define MyAppVersion "1.5.0"`
-- `build.bat` — the version printed in the header (cosmetic only)
+If `build.bat` fails, it prints a clear error and pauses — almost always either `V:` isn't mapped or the wrong conda env is active.
 
 ---
 
