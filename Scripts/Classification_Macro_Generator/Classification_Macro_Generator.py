@@ -53,7 +53,7 @@ _ensure_streams()
 warnings.filterwarnings("ignore", category=UserWarning, module="pkg_resources")
 
 # Version of the executable
-version = '4.1.2'
+version = '4.1.3'
 
 # --- Helper for resource loading (works for PyInstaller) ---
 def resource_path(relative_path):
